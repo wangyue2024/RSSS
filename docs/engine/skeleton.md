@@ -28,14 +28,16 @@ src/
 
 ```
 // src/engine/events.rs
-use crate::domain::types::{Order, Price, Vol};
+use crate::domain::types::{Price, Vol};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchEvent {
-    /// 撮合成交：记录双方 ID、成交价和数量
+    /// 撮合成交：同时携带 Order ID 和 Agent ID
     Trade {
-        maker_id: u64,
-        taker_id: u64,
+        maker_order_id: u64,
+        taker_order_id: u64,
+        maker_agent_id: u32,
+        taker_agent_id: u32,
         price: Price,
         amount: Vol,
     },
@@ -43,8 +45,15 @@ pub enum MatchEvent {
     Placed { order_id: u64 },
     /// 撤单成功：基于影子撤单机制
     Cancelled { order_id: u64 },
-    /// 订单拒绝：例如查无此单、价格不合法等
-    Rejected { order_id: u64, reason: &'static str },
+    /// 订单拒绝
+    Rejected { order_id: u64, reason: RejectReason },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectReason {
+    OrderNotFound,
+    InsufficientLiquidity,
+    InvalidPrice,
 }
 ```
 
@@ -77,14 +86,16 @@ impl LevelQueue {
         self.orders.push_back(order);
     }
 
-    /// 撮合吃单：从队头取出一个订单
-    pub fn pop_front(&mut self) -> Option<Order> {
-        if let Some(order) = self.orders.pop_front() {
-            self.total_volume.0 -= order.amount.0;
-            Some(order)
-        } else {
-            None
-        }
+    /// 原始弹出：从队头取出一个订单，**不**自动扣减 total_volume
+    /// 原因：影子撤单时已扣减过 total_volume，幽灵订单被 pop 时不应再次扣减
+    /// 调用方根据订单是否为幽灵来决定是否扣量
+    pub fn raw_pop_front(&mut self) -> Option<Order> {
+        self.orders.pop_front()
+    }
+
+    /// 扣减有效订单的成交量 (与 raw_pop_front 配合使用)
+    pub fn deduct_volume(&mut self, vol: Vol) {
+        self.total_volume -= vol;
     }
 
     /// 将部分成交的订单放回队头
@@ -107,13 +118,20 @@ impl LevelQueue {
 // src/engine/book.rs
 use std::collections::{BTreeMap, HashMap};
 use crate::domain::types::{Order, OrderType, Price, Side, Vol};
-use super::events::MatchEvent;
+use super::events::{MatchEvent, RejectReason};
 use super::queue::LevelQueue;
+
+/// 倒排索引元数据：存储挂单时的价格、方向和数量
+pub struct OrderMeta {
+    pub price: Price,
+    pub side: Side,
+    pub amount: Vol,  // 撤单时用于扣减 total_volume
+}
 
 pub struct OrderBook {
     pub bids: BTreeMap<Price, LevelQueue>, // 买盘
     pub asks: BTreeMap<Price, LevelQueue>, // 卖盘
-    pub order_index: HashMap<u64, Price>,  // 撤单索引 OrderID -> Price
+    pub order_index: HashMap<u64, OrderMeta>, // 撤单索引
 }
 
 impl OrderBook {
@@ -127,21 +145,24 @@ impl OrderBook {
 
     /// 核心入口：接收订单，返回事件列表
     pub fn process_order(&mut self, order: Order) -> Vec<MatchEvent> {
+        let mut events = Vec::new();
+        let mut taker = order;
         // [To-Do]: 
-        // 1. 如果是撤单请求(假设有一个单独的方法或者包装)，走撤单逻辑。
-        // 2. 这里处理开仓/平仓请求。
-        // 3. 循环调用 `attempt_match` 直到无成交量或无对手盘。
-        // 4. 如果还有剩余，挂单 (post_to_book)。
+        // 1. 循环调用 attempt_match 直到无成交量或无对手盘
+        // 2. 如果还有剩余：
+        //    - 限价单: 挂单 (post_to_book)
+        //    - 市价单: 剩余量直接抛弃 (IOC)
         unimplemented!()
     }
 
     /// 执行影子撤单
     pub fn cancel_order(&mut self, order_id: u64) -> MatchEvent {
         // [To-Do]:
-        // 1. 从 order_index 中 remove 取出 Price。
-        // 2. 找到对应的 BTreeMap 和 LevelQueue。
-        // 3. 扣减 queue.total_volume (不操作 VecDeque)。
-        // 4. 返回 Cancelled / Rejected。
+        // 1. 从 order_index 中 remove 取出 OrderMeta { price, side, amount }
+        // 2. 根据 side 找到对应的 BTreeMap (bids 或 asks)
+        // 3. 根据 price 找到 LevelQueue
+        // 4. 扣减 queue.total_volume -= meta.amount (不操作 VecDeque)
+        // 5. 返回 Cancelled / Rejected { reason: OrderNotFound }
         unimplemented!()
     }
 
@@ -151,24 +172,50 @@ impl OrderBook {
         unimplemented!()
     }
 
+    /// GC 回收：清理幽灵订单
+    pub fn gc_phantom_orders(&mut self) -> GcReport {
+        // [To-Do]:
+        // 1. 遍历所有 LevelQueue
+        // 2. retain 仅保留 order_index 中存在的订单
+        // 3. 重算 total_volume
+        // 4. 清理空的价格档位
+        unimplemented!()
+    }
+
+    /// 快速统计幽灵订单数
+    pub fn phantom_count(&self) -> usize {
+        let total_in_queues: usize = self.bids.values().map(|q| q.orders.len()).sum::<usize>()
+            + self.asks.values().map(|q| q.orders.len()).sum::<usize>();
+        total_in_queues - self.order_index.len()
+    }
+
     // --- 私有辅助函数 ---
 
     /// 挂单逻辑
     fn post_to_book(&mut self, order: Order) {
-        // [To-Do]: 更新 order_index，插入对应 BTreeMap
+        // [To-Do]: 插入 order_index (OrderMeta { price, side, amount })，插入对应 BTreeMap
     }
 
     /// 尝试进行一次撮合循环
-    /// 返回值：(本次吃掉的数量, 是否需要继续撮合)
-    fn attempt_match(&mut self, taker: &mut Order) -> (Vol, bool) {
+    /// events: 用于收集产生的 Trade 事件
+    /// 返回值：是否需要继续撮合
+    fn attempt_match(&mut self, taker: &mut Order, events: &mut Vec<MatchEvent>) -> bool {
         // [To-Do]: 
         // 1. 查找最优对手价 (best_ask / best_bid)
         // 2. 交叉验证 (Cross Check)
         // 3. 幽灵订单清理 (Ghost Order GC): 
-        //    从 LevelQueue pop_front() 后，必须检查其 id 是否还在 order_index 中！
-        // 4. 生成 Trade 事件 (可以通过可变引用传递 events 数组收集)
+        //    从 LevelQueue raw_pop_front() 后，检查 id 是否在 order_index 中
+        //    有效订单: deduct_volume + 生成 Trade
+        //    幽灵订单: 直接丢弃，不扣量
+        // 4. 生成 Trade 事件 push 到 events
         unimplemented!()
     }
+}
+
+pub struct GcReport {
+    pub cleaned_count: usize,
+    pub remaining_orders: usize,
+    pub removed_levels: usize,
 }
 ```
 
@@ -225,11 +272,12 @@ if let Some(price) = best_price {
 
 ```
 let mut maker_order = loop {
-    let order = queue.pop_front()?; // 如果队列空了，退出
+    let order = queue.raw_pop_front()?; // 如果队列空了，退出
     if self.order_index.contains_key(&order.id) {
-        break order; // 只有在 index 里存活的订单才是有效的
+        // 有效订单：扣减成交量 (影子撤单未触及此订单)
+        break order;
     }
-    // 否则继续 loop 丢弃幽灵订单
+    // 幽灵订单：影子撤单时已扣减 total_volume，此处直接丢弃，不再扣量
 };
 ```
 
@@ -242,3 +290,5 @@ let mut maker_order = loop {
 3. `test_partial_match()`: 测试数量不匹配时的吃单（留有余额）。
 4. `test_shadow_cancellation()`: 下单 -> 取消单 -> `assert!(order_index.is_empty())` -> 验证 L2 总量被扣减。
 5. `test_ghost_order_skipped()`: 下单A -> 下单B -> 取消下单A -> 对手盘市价吃单 -> 断言 B 被吃，A 被直接丢弃。
+6. `test_gc_cleans_phantom_orders()`: 下单A -> 撤单A -> 调用 `gc_phantom_orders()` -> 断言 `phantom_count() == 0` 且 VecDeque 已清空。
+7. `test_phantom_count()`: 下 5 个单，撤 3 个 -> 断言 `phantom_count() == 3`。

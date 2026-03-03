@@ -1,0 +1,15 @@
+[package]
+name = "rsss"
+version = "0.1.0"
+edition = "2021"
+description = "Rust Stock Simulation System - High-frequency microstructure market simulation"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = true

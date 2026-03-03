@@ -34,8 +34,8 @@ src/
 * `i64::MAX` 约等于 $9.22 \times 10^{18}$。
 * 除以缩放因子后，系统最大可表达的金额为 $9.22 \times 10^{12}$ (9.22 万亿)。足够模拟任何单体账户或股票市值。
 * **乘法溢出陷阱 (The Overflow Trap)** :
-* 两个定点数相乘，规模会被放大 `Scale * Scale`，极易溢出 `i64`。
-* **规范** : 所有的金额乘法（如 `Price * Volume` 计算交易额）必须在内部提升至 `i128`，除以 Scale 后，再转回 `i64`。
+* 价格微元与原始股数相乘计算成交额时，结果可能溢出 `i64`。必须在内部提升至 `i128`。
+* 两个微元值相乘（如费率计算），缩放因子会翻倍 (Scale²)，必须在 `i128` 中计算后除以 Scale 还原。
 
 ### 3.2 强类型包装规范 (`types.rs`)
 
@@ -54,16 +54,16 @@ pub struct Vol(pub u64); // 数量不为负
 
  **物理内存布局分析表** :
 
-| 字段            | 类型                   | 大小 (Bytes) | 偏移量 (Offset) | 说明                            |
-| :-------------- | :--------------------- | :----------- | :-------------- | :------------------------------ |
-| `id`          | `u64`                | 8            | 0               | 全局唯一标识，兼作时间序列号    |
-| `price`       | `Price` (`i64`)    | 8            | 8               | 定点数价格                      |
-| `amount`      | `Vol` (`u64`)      | 8            | 16              | 订单数量 (剩余未成交量)         |
-| `agent_id`    | `u32`                | 4            | 24              | 所属智能体 ID                   |
-| `side`        | `Side` (`u8`)      | 1            | 28              | 买/卖方向                       |
-| `kind`        | `OrderType` (`u8`) | 1            | 29              | 市价/限价                       |
-| *(Padding)*   | `-`                  | 2            | 30              | 编译器自动填充，对齐到 8 的倍数 |
-| **Total** |                        | **32** |                 | 完美的半缓存行大小              |
+| 字段        | 类型               | 大小 (Bytes) | 偏移量 (Offset) | 说明                            |
+| :---------- | :----------------- | :----------- | :-------------- | :------------------------------ |
+| `id`        | `u64`              | 8            | 0               | 全局唯一标识，兼作时间序列号    |
+| `price`     | `Price` (`i64`)    | 8            | 8               | 定点数价格                      |
+| `amount`    | `Vol` (`u64`)      | 8            | 16              | 订单数量 (剩余未成交量)         |
+| `agent_id`  | `u32`              | 4            | 24              | 所属智能体 ID                   |
+| `side`      | `Side` (`u8`)      | 1            | 28              | 买/卖方向                       |
+| `kind`      | `OrderType` (`u8`) | 1            | 29              | 市价/限价                       |
+| *(Padding)* | `-`                | 2            | 30              | 编译器自动填充，对齐到 8 的倍数 |
+| **Total**   |                    | **32**       |                 | 完美的半缓存行大小              |
 
 *(注：必须添加 `#[repr(C)]` 以确保编译器不随意重排内存)*
 
@@ -85,31 +85,49 @@ pub use types::*;
 ### 4.2 `src/domain/fixed.rs`
 
 ```
+use super::types::{Price, Vol};
+
 /// 定点数核心常量与工具
 /// 采用 6 位小数精度
+/// 100.50 元 = Price(100_500_000)
+/// 所有价格/金额直接以 i64 微元构造，系统中不存在 f64 入口
 pub const SCALING_FACTOR: i64 = 1_000_000;
+pub const BPS_DIVISOR: i64 = 10_000;
 
-/// 将外部系统的浮点数转化为内部的定点数微元
+/// 安全计算成交额 (Cost = Price × Volume)
+/// Vol 是原始股数（非微元），结果仍为微元单位的 Price
+/// 内部采用 i128 防止乘法溢出
 #[inline]
-pub fn to_micros(value: f64) -> i64 {
-    (value * SCALING_FACTOR as f64) as i64
+pub fn calculate_cost(price: Price, volume: Vol) -> Price {
+    let p = price.0 as i128;
+    let v = volume.0 as i128;
+    Price((p * v) as i64)
 }
 
-/// 将内部的定点数微元转化为外部可读的浮点数
+/// 两个微元值相乘 (用于 Price × Price 类计算)
+/// 结果除以 SCALING_FACTOR 还原精度
 #[inline]
-pub fn from_micros(micros: i64) -> f64 {
-    micros as f64 / SCALING_FACTOR as f64
+pub fn mul_micros(a: i64, b: i64) -> i64 {
+    let result = (a as i128 * b as i128) / (SCALING_FACTOR as i128);
+    result as i64
 }
 
-/// 安全计算成交额 (Cost)
-/// 公式: (Price * Volume) / Scale
-/// 内部采用 i128 防止乘法瞬间溢出 i64 边界
+/// 计算手续费 (Fee = Cost × fee_bps / BPS_DIVISOR)
+/// fee_bps 以基点表示，如 3 = 万分之三
 #[inline]
-pub fn calculate_cost(price: i64, volume: u64) -> i64 {
-    let p = price as i128;
-    let v = volume as i128;
-    let cost = (p * v) / (SCALING_FACTOR as i128);
-    cost as i64
+pub fn calculate_fee(cost: Price, fee_bps: i64) -> Price {
+    let c = cost.0 as i128;
+    let fee = (c * fee_bps as i128) / (BPS_DIVISOR as i128);
+    Price(fee as i64)
+}
+
+/// 展示用：将内部微元转为人类可读字符串 (仅用于日志/TUI)
+pub fn micros_to_display(micros: i64) -> String {
+    if micros < 0 {
+        format!("-{}.{:06}", (-micros) / SCALING_FACTOR, (-micros) % SCALING_FACTOR)
+    } else {
+        format!("{}.{:06}", micros / SCALING_FACTOR, micros % SCALING_FACTOR)
+    }
 }
 
 #[cfg(test)]
@@ -117,17 +135,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_fixed_conversion() {
-        assert_eq!(to_micros(100.50), 100_500_000);
-        assert_eq!(from_micros(100_500_000), 100.50);
+    fn test_safe_cost_calculation() {
+        let price = Price(100_000_000); // 100.00 元
+        let vol = Vol(50);              // 50 股
+        let cost = calculate_cost(price, vol);
+        assert_eq!(cost, Price(5_000_000_000)); // 5000.00 元
     }
 
     #[test]
-    fn test_safe_cost_calculation() {
-        let price = to_micros(100.0); // 100,000,000
-        let vol = 50;                 // 50 股
-        let cost = calculate_cost(price, vol);
-        assert_eq!(from_micros(cost), 5000.0);
+    fn test_fee() {
+        let cost = Price(5_000_000_000); // 5000.00 元
+        let fee = calculate_fee(cost, 3); // 万分之三
+        assert_eq!(fee, Price(1_500_000)); // 1.50 元
+    }
+
+    #[test]
+    fn test_display() {
+        assert_eq!(micros_to_display(100_500_000), "100.500000");
+        assert_eq!(micros_to_display(-50_300_000), "-50.300000");
     }
 }
 ```
@@ -139,7 +164,6 @@ mod tests {
 ```
 use serde::{Deserialize, Serialize};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
-use crate::domain::fixed::{from_micros, to_micros};
 
 // --- NewType Definitions ---
 
@@ -148,12 +172,6 @@ pub struct Price(pub i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash, Serialize, Deserialize)]
 pub struct Vol(pub u64);
-
-// 为 Price 提供便捷的方法与运算符重载
-impl Price {
-    #[inline] pub fn from_f64(val: f64) -> Self { Self(to_micros(val)) }
-    #[inline] pub fn to_f64(self) -> f64 { from_micros(self.0) }
-}
 
 impl Add for Price {
     type Output = Self;
@@ -172,9 +190,9 @@ impl AddAssign for Vol {
 
 impl SubAssign for Vol {
     #[inline] fn sub_assign(&mut self, other: Self) {
-        // 使用 assert 防止由于撮合逻辑 Bug 导致的负成交量
-        debug_assert!(self.0 >= other.0, "Volume cannot be negative");
-        self.0 -= other.0;
+        // 金融系统关键不变量：使用 checked_sub 防止 release 下的静默下溢
+        self.0 = self.0.checked_sub(other.0)
+            .expect("FATAL: Volume underflow - matching engine bug");
     }
 }
 
@@ -233,4 +251,10 @@ mod tests {
 1. **`PartialOrd` 排序陷阱** :
    Rust 的 `#[derive(Ord)]` 是根据结构体或元组字段**从上到下**的顺序派生的。对于 `Price(pub i64)`，它会自动按内部 `i64` 比较大小。因此，不需要手动去实现复杂的 `cmp` 逻辑。
 2. **`serde` 序列化性能** :
-   在将事件抛给 IO 线程写 CSV 时，虽然内部是定点数，但导出的 JSON/CSV 中 `price` 字段会显示为大整数。如果需要在日志中看到可读的 `100.5`，建议在 `simulation` 的输出层 (Presenter Layer) 进行格式化， **不要为了可读性去污染 Domain 内部的结构** 。
+   在将事件抛给 IO 线程写 CSV 时，虽然内部是定点数，但导出的 JSON/CSV 中 `price` 字段会显示为大整数。如果需要在日志中看到可读的 `100.5`，建议使用 `fixed.rs` 中的 `micros_to_display()` 在 `simulation` 的输出层 (Presenter Layer) 进行格式化， **不要为了可读性去污染 Domain 内部的结构** 。
+
+## 6. 待改进项 (Future Improvements)
+
+1. **`Price` 溢出保护** : 当前 `Add`/`Sub` 未检查溢出。极端测试/fuzz 场景下可考虑提供 `checked_add`/`checked_sub` 安全方法。
+2. **`Display` trait** : 为 `Price` 实现 `Display`，输出 `"100.500000"` 格式，提升调试体验（不影响内部存储）。
+3. **`Order` 字段语义文档化** : `amount` 字段在撮合过程中是可变的（代表剩余量），文档应明确标注此语义。如需同时追踪原始下单量，可考虑新增 `original_amount: Vol`（但会破坏 32 字节对齐，需权衡）。

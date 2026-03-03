@@ -35,6 +35,7 @@ pub struct OrderBook {
 pub struct OrderMeta {
     pub price: Price,
     pub side: Side,
+    pub amount: Vol,  // 用于影子撤单时正确扣减 LevelQueue.total_volume
 }
 ```
 
@@ -55,14 +56,27 @@ pub struct LevelQueue {
 
 ```
 pub enum MatchEvent {
-    // 成交事件：包含 Maker 和 Taker 的 ID、成交价和数量
-    Trade { maker_id: u64, taker_id: u64, price: Price, amount: Vol },
+    // 成交事件：同时携带 Order ID 和 Agent ID，方便外部结算
+    Trade {
+        maker_order_id: u64,
+        taker_order_id: u64,
+        maker_agent_id: u32,
+        taker_agent_id: u32,
+        price: Price,
+        amount: Vol,
+    },
     // 挂单成功 (进入 OrderBook)
     Placed { order_id: u64 },
     // 撤单成功
     Cancelled { order_id: u64 },
-    // 订单被拒绝 (如市价单无流动性)
+    // 订单被拒绝
     Rejected { order_id: u64, reason: RejectReason },
+}
+
+pub enum RejectReason {
+    OrderNotFound,           // 撤单时找不到该订单
+    InsufficientLiquidity,   // 市价单无对手盘
+    InvalidPrice,            // 价格不合法
 }
 ```
 
@@ -106,10 +120,10 @@ pub enum MatchEvent {
 传统的撤单需要在队列中做 $O(N)$ 的搜索和删除，本系统采用 $O(1)$ ** 影子撤单** ：
 
 1. **收到撤单请求** `Cancel(order_id)`。
-2. 从 `order_index` 中查找并 `remove` 掉这个 `order_id`。如果找不到，返回 `Rejected`。
-3. 根据索引中的 `Price` 找到 `BTreeMap` 中的 `LevelQueue`。
+2. 从 `order_index` 中查找并 `remove` 掉这个 `order_id`，取出 `OrderMeta { price, side, amount }`。如果找不到，返回 `Rejected { reason: OrderNotFound }`。
+3. 根据 `side` 和 `price` 找到对应 `BTreeMap`（bids 或 asks）中的 `LevelQueue`。
 4. **关键优化** ： **不从 `VecDeque` 中移除实体订单** 。
-5. **仅扣减总量** ：`queue.total_volume -= order.amount`。
+5. **扣减总量** ：`queue.total_volume -= meta.amount`（从 `OrderMeta` 中获取原始挂单量）。
 6. 返回 `MatchEvent::Cancelled`。
 
  **垃圾回收 (Garbage Collection) / 幽灵订单处理** ：
@@ -154,5 +168,37 @@ pub enum MatchEvent {
 3. **幽灵撤单撮合 (Ghost Order Matching)** ：挂单 A，撤单 A，立即市价吃单。断言市价单不会与 A 成交，且 A 从队列中被静默回收。
 4. **自成交保护 (Wash Trade)** ：(可选) 如果 Maker 和 Taker 的 `agent_id` 相同，记录警告事件或阻止成交（取决于仿真的经济学规则设定）。
 5. **不变量断言 (Invariants)** ：在每次撮合结束后，`debug_assert!` 买一价必须严格小于卖一价 (Best Bid < Best Ask)。
+
+## 6. GC 回收接口 (Phantom Order Garbage Collection)
+
+影子撤单会在 `VecDeque` 中残留“幽灵订单”，占据内存但不参与撮合。在极端行情下（价格远离某档位，导致该档位永远不被撮合触及），幽灵订单可能永远无法被自动清理。
+
+引擎提供以下接口，由外部 Simulation 模块在合适时机调用：
+
+```
+/// 清理所有价格档位中的幽灵订单
+/// 建议每 N 个 Tick 调用一次，或当 phantom_count() 超过阈值时触发
+pub fn gc_phantom_orders(&mut self) -> GcReport {
+    // 遍历所有 LevelQueue，retain 仅保留 order_index 中存在的订单
+    // 同步重算 total_volume
+    // 清理空的价格档位
+}
+
+pub struct GcReport {
+    pub cleaned_count: usize,        // 本次清理的幽灵订单数
+    pub remaining_orders: usize,     // 清理后的有效订单总数
+    pub removed_levels: usize,       // 被移除的空价格档位数
+}
+
+/// 快速统计当前幽灵订单数
+/// = 所有 LevelQueue 中 orders.len() 总和 - order_index.len()
+pub fn phantom_count(&self) -> usize { ... }
+```
+
+## 7. 待改进项 (Future Improvements)
+
+1. **`Placed` 事件完整化** : 当前 `Placed { order_id }` 信息不完整。可考虑加入 `price`, `remaining`, `side` 字段，使事件自包含。
+2. **市价单滑点保护** : 当前市价单“无视价格限制，直接吃单”，在流动性不足时可能产生极端成交价。可考虑在 `Order` 中增加 `worst_price: Option<Price>` 作为滑点保护。
+3. **撮合统计** : 考虑在 `OrderBook` 中维护基本统计信息（如总订单数、总成交量），便于监控与调试。
 
 *文末：本规范作为 RSSS Phase 1 的实施蓝图。所有接口契约锁定，后续代码生成与人工编写均需严格遵守此文档。*
