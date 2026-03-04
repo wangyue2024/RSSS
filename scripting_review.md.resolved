@@ -1,0 +1,166 @@
+# Scripting v2.0 设计审查 — 发现的问题
+
+## 🔴 问题 A：`fn init()` 里的变量不会保留 — 致命 Bug
+
+**Rhai 的 `call_fn` 规则**：函数内部用 `let` 声明的变量是**函数局部的**，函数返回后 Scope **自动回卷 (rewind)**，新变量被丢弃。
+
+```rhai
+fn init() {
+    let my_target = 100;    // ← 局部变量！call_fn 返回后消失！
+}
+fn on_tick() {
+    my_target += 1;          // ← ERROR: 变量不存在
+}
+```
+
+**修复方案**：将 Agent 状态声明为**顶层代码**，用 `run_ast_with_scope` 执行一次初始化：
+
+```rhai
+// ===== 顶层代码 = 初始化 (只执行一次) =====
+let my_target = 100;
+let trade_count = 0;
+let active_order_id = -1;
+
+// ===== 函数定义 =====
+fn on_tick() {
+    // 顶层变量在 Scope 里，on_tick 可以读写
+    trade_count += 1;
+    if market.price > my_target { /* ... */ }
+}
+```
+
+Rust 调用协议变为：
+
+```rust
+// 初始化：执行顶层代码，变量留在 scope 中
+engine.run_ast_with_scope(&mut scope, &ast)?;
+
+// 每 Tick：调用 on_tick 函数 (scope 变量可访问)
+engine.call_fn::<()>(&mut scope, &ast, "on_tick", ())?;
+```
+
+**影响**：
+- 脚本结构约定改变：不再有 `fn init()`，改为**顶层代码 + `fn on_tick()`**
+- Pre-flight 检查改为：只需验证 `on_tick` 函数存在
+
+---
+
+## 🟡 问题 B：`Arc<T>` 必须注册为 Rhai 类型本身
+
+文档里注册 getter 写的是 `|state: &mut MarketState|`。但 Scope 里注入的是 `Arc<MarketState>`。Rhai 不会自动解引用 Arc。
+
+如果注册 `MarketState` 为类型但注入 `Arc<MarketState>`，getter 调不通。
+
+**修复**：直接注册 `Arc<MarketState>` 为 Rhai 类型：
+
+```rust
+engine.register_type_with_name::<Arc<MarketState>>("MarketState");
+engine.register_get("price", |s: &mut Arc<MarketState>| s.price);
+engine.register_get("tick",  |s: &mut Arc<MarketState>| s.tick);
+// ...
+```
+
+Rhai 对 `&mut Arc<T>` 调 getter 时，只 clone Arc（引用计数 +1，O(1)），不 clone 内部数据。
+
+`AgentOrderBook` 同理：
+
+```rust
+engine.register_type_with_name::<Arc<AgentOrderBook>>("AgentOrderBook");
+engine.register_fn("pending_count", |ob: &mut Arc<AgentOrderBook>| -> i64 {
+    ob.pending.len() as i64
+});
+```
+
+---
+
+## 🟡 问题 C：Order ID 碰撞风险
+
+文档方案 `agent_id * 1_000_000 + tick * 100` 在大 Tick 数下溢出。
+
+**修复**：改用位编码方案：
+
+```
+order_id (i64) = agent_id (高 20 位) | global_counter (低 44 位)
+```
+
+```rust
+// 更简单的全局原子计数器 (主线程串行分配，无并行竞争)
+static NEXT_ORDER_ID: AtomicU64 = AtomicU64::new(1);
+
+impl ActionMailbox {
+    fn next_id(&self) -> i64 {
+        // agent_id 编码在高位，低位用自增
+        ((self.agent_id as i64) << 44) | (NEXT_ORDER_ID.fetch_add(1, Relaxed) as i64)
+    }
+}
+```
+
+但因为 ActionMailbox 在并行的 Rayon 中使用，原子操作是安全的。或者更简单——因为每 Agent 的 ActionMailbox 是独立的：
+
+```rust
+impl ActionMailbox {
+    fn new(agent_id: u32) -> Self {
+        Self {
+            actions: Vec::new(),
+            agent_id,
+            counter: 0,
+        }
+    }
+    fn next_id(&mut self) -> i64 {
+        self.counter += 1;
+        // 32 位 agent_id + 32 位 counter，足够用
+        ((self.agent_id as i64) << 32) | (self.counter as i64)
+    }
+}
+```
+
+无原子操作，无并行竞争，ID 全局唯一。
+
+---
+
+## 🟢 问题 D：AgentOrderBook 更新时机
+
+文档没有明确谁在什么时候更新 `AgentOrderBook`。
+
+**完整时序**：
+
+```
+[Execution 阶段]
+  for (agent_id, action) in shuffled_actions:
+      order = convert_to_order(action)
+      events = engine.process_order(order)
+      for event in events:
+          match event:
+              Trade { maker_agent_id, taker_agent_id, ... }:
+                  → agents[maker].order_book 更新 pending (扣减 remaining)
+                  → agents[maker].order_book.last_fills.push(...)
+                  → agents[taker].order_book.last_fills.push(...)
+                  → 如果 remaining == 0: 从 pending 移到 history
+              Placed { order_id, ... }:
+                  → agents[taker].order_book.pending.push(PendingOrder{...})
+              Cancelled { order_id }:
+                  → 从 pending 移到 history (status=1)
+              Rejected { order_id, ... }:
+                  → 记录到 history (status=2)
+
+[下一 Tick Pre-Calculation]
+  for agent in agents:
+      agent.order_book.last_fills.clear()  // 清空上 Tick 成交
+```
+
+这是 **Simulation 模块** 的职责。
+
+---
+
+## 🟢 问题 E：同 Tick 下单+撤单语义
+
+Agent 可以在同一个 `on_tick` 中：
+
+```rhai
+let id = orders.submit_limit_buy(price, 50);
+orders.submit_cancel(id);  // 同 Tick 提交
+```
+
+由于所有 action 经过 **Shuffle** 后送入引擎，cancel 可能在 submit 之前执行（OrderNotFound），或在 submit 之后执行（正常撤单）。这**符合真实市场语义**——订单到达交易所的顺序是不确定的。
+
+无需修复，但应在文档中说明。
