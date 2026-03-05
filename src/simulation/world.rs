@@ -45,6 +45,9 @@ pub struct World {
 
     // — 统计 —
     pub sim_rejects: u64,
+
+    // — 本 Tick 成交记录 (supply to recorder/TUI) —
+    pub last_tick_trades: Vec<(u32, u32, i64, i64, i8)>, // (maker_id, taker_id, price, amount, taker_side)
 }
 
 impl World {
@@ -95,6 +98,7 @@ impl World {
             tick_sell_volume: 0,
             tick_vwap_numer: 0,
             sim_rejects: 0,
+            last_tick_trades: Vec::new(),
         })
     }
 
@@ -119,6 +123,9 @@ impl World {
         for agent in &mut self.agents {
             agent.order_book.last_fills.clear();
         }
+
+        // 1a2. 清空上 Tick 的 trade 记录
+        self.last_tick_trades.clear();
 
         // 1b. 推送上一 Tick 数据到指标引擎
         self.indicators.push(
@@ -246,6 +253,19 @@ impl World {
 
                 // 更新价格
                 self.indicators.set_last_price(price.as_micros());
+
+                // 记录 trade 事件 (maker_id, taker_id, price, amount, taker_side)
+                let side_i8: i8 = match taker_side {
+                    Side::Bid => 1,
+                    Side::Ask => -1,
+                };
+                self.last_tick_trades.push((
+                    *maker_agent_id,
+                    taker_agent_id,
+                    price.as_micros(),
+                    amount.as_u64() as i64,
+                    side_i8,
+                ));
 
                 // 聚合统计
                 let vol = amount.as_u64() as i64;

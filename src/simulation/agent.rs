@@ -100,8 +100,8 @@ impl AgentState {
             self.initialized = true;
         }
 
-        // 执行 on_tick
-        if let Err(e) = engine.call_fn::<()>(&mut self.scope, &self.ast, "on_tick", ()) {
+        // 执行 on_tick (用 Dynamic 接收任意返回值)
+        if let Err(e) = engine.call_fn::<rhai::Dynamic>(&mut self.scope, &self.ast, "on_tick", ()) {
             eprintln!("Agent {} script error: {}", self.id, e);
         }
 

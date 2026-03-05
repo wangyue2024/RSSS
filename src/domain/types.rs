@@ -149,11 +149,9 @@ impl AddAssign for Vol {
 impl SubAssign for Vol {
     #[inline]
     fn sub_assign(&mut self, other: Self) {
-        // 金融系统关键不变量：使用 checked_sub 防止 release 下的静默下溢
-        self.0 = self
-            .0
-            .checked_sub(other.0)
-            .expect("FATAL: Volume underflow - matching engine bug");
+        // 使用 saturating_sub 防止 cancel+fill 竞争导致的下溢
+        // (同一 Tick 内 Shuffle 后, cancel 可能作用于已被 fill 消耗的 total_volume)
+        self.0 = self.0.saturating_sub(other.0);
     }
 }
 
@@ -287,10 +285,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "FATAL: Volume underflow")]
-    fn test_vol_underflow_panics() {
+    fn test_vol_underflow_saturates() {
         let mut v = Vol(10);
-        v -= Vol(20); // 应该 panic
+        v -= Vol(20); // 应该饱和到 0, 不 panic
+        assert_eq!(v, Vol(0));
     }
 
     #[test]
