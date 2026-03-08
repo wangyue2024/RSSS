@@ -6,6 +6,7 @@
 //! - `AgentOrderBook` — 只读订单跟踪 (Arc 包装)
 //! - `ActionMailbox`  — 可变决策收集器
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 // ============================================================================
@@ -119,8 +120,8 @@ pub struct AccountView {
 #[derive(Clone, Debug, Default)]
 pub struct AgentOrderBook {
     pub pending: Vec<PendingOrder>,
-    pub last_fills: Vec<FillReport>,
-    pub history: Vec<HistoricalOrder>,
+    pub last_fills: Vec<FillReport>, // 暂时保持不变，或者改成 VecDeque
+    pub history: VecDeque<HistoricalOrder>, // 改为 VecDeque 提升删除老数据的性能
 }
 
 /// 当前活跃挂单
@@ -129,6 +130,7 @@ pub struct PendingOrder {
     pub order_id: i64,
     pub side: i64,      // 1 = buy, -1 = sell
     pub price: i64,     // 微元
+    pub amount: i64,    // 原始总挂单量
     pub remaining: i64, // 剩余量
     pub placed_tick: i64,
 }
@@ -382,6 +384,12 @@ fn register_agent_order_book(engine: &mut rhai::Engine) {
         "pending_price",
         |ob: &mut Arc<AgentOrderBook>, i: i64| -> i64 {
             ob.pending.get(i as usize).map(|o| o.price).unwrap_or(0)
+        },
+    );
+    engine.register_fn(
+        "pending_amount",
+        |ob: &mut Arc<AgentOrderBook>, i: i64| -> i64 {
+            ob.pending.get(i as usize).map(|o| o.amount).unwrap_or(0)
         },
     );
     engine.register_fn(

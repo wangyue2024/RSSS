@@ -149,9 +149,12 @@ impl AddAssign for Vol {
 impl SubAssign for Vol {
     #[inline]
     fn sub_assign(&mut self, other: Self) {
-        // 使用 saturating_sub 防止 cancel+fill 竞争导致的下溢
-        // (同一 Tick 内 Shuffle 后, cancel 可能作用于已被 fill 消耗的 total_volume)
-        self.0 = self.0.saturating_sub(other.0);
+        self.0 = self.0.checked_sub(other.0).unwrap_or_else(|| {
+            panic!(
+                "FATAL: Volume underflow - engine bug detected ({} - {})",
+                self.0, other.0
+            );
+        });
     }
 }
 
@@ -285,10 +288,10 @@ mod tests {
     }
 
     #[test]
-    fn test_vol_underflow_saturates() {
+    #[should_panic(expected = "Volume underflow")]
+    fn test_vol_underflow_panics() {
         let mut v = Vol(10);
-        v -= Vol(20); // 应该饱和到 0, 不 panic
-        assert_eq!(v, Vol(0));
+        v -= Vol(20);
     }
 
     #[test]

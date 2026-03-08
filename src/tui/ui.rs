@@ -198,7 +198,7 @@ fn draw_orderbook(f: &mut Frame, area: Rect, state: &UiState) {
 }
 
 fn draw_agents(f: &mut Frame, area: Rect, state: &UiState) {
-    let header_cells = ["ID", "Type", "Cash", "Stock", "Equity", "PnL"]
+    let header_cells = ["ID", "Type", "Cash (Lck)", "Stock (Lck)", "Equity", "PnL"]
         .iter()
         .map(|h| {
             Cell::from(*h).style(
@@ -220,8 +220,12 @@ fn draw_agents(f: &mut Frame, area: Rect, state: &UiState) {
         Row::new(vec![
             Cell::from(format!("{:>3}", a.id)),
             Cell::from(strategy_name(a.strategy_idx, state.num_scripts)),
-            Cell::from(fmt_price(a.cash)),
-            Cell::from(format!("{}", a.stock)),
+            Cell::from(format!(
+                "{} ▼{}",
+                fmt_price(a.cash),
+                fmt_price(a.locked_cash)
+            )),
+            Cell::from(format!("{} ▼{}", a.stock, a.locked_stock)),
             Cell::from(fmt_price(a.equity)),
             Cell::from(fmt_price(a.realized_pnl)).style(Style::default().fg(pnl_color)),
         ])
@@ -232,8 +236,8 @@ fn draw_agents(f: &mut Frame, area: Rect, state: &UiState) {
         [
             Constraint::Length(4),
             Constraint::Length(6),
+            Constraint::Length(20),
             Constraint::Length(12),
-            Constraint::Length(6),
             Constraint::Length(12),
             Constraint::Length(12),
         ],

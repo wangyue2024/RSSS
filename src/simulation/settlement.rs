@@ -4,6 +4,7 @@
 
 use crate::domain::{calculate_cost, calculate_fee, Price, Side, Vol};
 use crate::scripting::api::{AgentAction, FillReport, HistoricalOrder, PendingOrder};
+use std::sync::Arc;
 
 use super::agent::AgentState;
 
@@ -21,7 +22,16 @@ pub enum SimRejectReason {
 }
 
 /// 前置校验：订单合法性检查
-pub fn validate_action(agent: &AgentState, action: &AgentAction) -> Result<(), SimRejectReason> {
+pub fn validate_action(
+    agent: &AgentState,
+    action: &AgentAction,
+    fee_rate_bps: i64,
+    reference_price: i64,
+) -> Result<(), SimRejectReason> {
+    // O(1) 获取挂单占用的资金和股票
+    let reserved_cash = agent.locked_cash as i128;
+    let reserved_stock = agent.locked_stock;
+
     match action {
         AgentAction::LimitBuy { price, amount, .. } => {
             if *amount <= 0 {
@@ -30,9 +40,10 @@ pub fn validate_action(agent: &AgentState, action: &AgentAction) -> Result<(), S
             if *price <= 0 {
                 return Err(SimRejectReason::InvalidPrice);
             }
-            // i128 防溢出
             let cost = (*price as i128) * (*amount as i128);
-            if cost > agent.cash as i128 {
+            let fee = cost * (fee_rate_bps as i128) / 10000;
+            let available_cash = (agent.cash as i128) - reserved_cash;
+            if cost + fee > available_cash {
                 return Err(SimRejectReason::InsufficientCash);
             }
             Ok(())
@@ -44,7 +55,8 @@ pub fn validate_action(agent: &AgentState, action: &AgentAction) -> Result<(), S
             if *price <= 0 {
                 return Err(SimRejectReason::InvalidPrice);
             }
-            if agent.stock < *amount {
+            let available_stock = agent.stock - reserved_stock;
+            if available_stock < *amount {
                 return Err(SimRejectReason::InsufficientStock);
             }
             Ok(())
@@ -53,7 +65,16 @@ pub fn validate_action(agent: &AgentState, action: &AgentAction) -> Result<(), S
             if *amount <= 0 {
                 return Err(SimRejectReason::ZeroAmount);
             }
-            if agent.cash <= 0 {
+            let estimated_price = if reference_price > 0 {
+                reference_price
+            } else {
+                1_000_000_000
+            };
+            // 保守预估：市价单可能遭遇 10% 滑点
+            let cost = (estimated_price as i128 * 110 / 100) * (*amount as i128);
+            let fee = cost * (fee_rate_bps as i128) / 10000;
+            let available_cash = (agent.cash as i128) - reserved_cash;
+            if cost + fee > available_cash {
                 return Err(SimRejectReason::InsufficientCash);
             }
             Ok(())
@@ -62,7 +83,8 @@ pub fn validate_action(agent: &AgentState, action: &AgentAction) -> Result<(), S
             if *amount <= 0 {
                 return Err(SimRejectReason::ZeroAmount);
             }
-            if agent.stock < *amount {
+            let available_stock = agent.stock - reserved_stock;
+            if available_stock < *amount {
                 return Err(SimRejectReason::InsufficientStock);
             }
             Ok(())
@@ -108,8 +130,13 @@ pub fn settle_trade(
             maker.realized_pnl += (price.as_micros() - avg) * vol;
             maker.cash += cost_micros - fee_micros;
             maker.stock -= vol;
-            // 调整持仓成本: 卖出 vol 股, 按均价扣减
-            maker.total_cost -= avg * vol;
+            // 调整持仓成本: 精确按比例分摊, 避免整除截断漂移
+            if maker.stock <= 0 {
+                maker.total_cost = 0;
+            } else {
+                maker.total_cost -=
+                    (maker.total_cost as i128 * vol as i128 / (maker.stock + vol) as i128) as i64;
+            }
         }
         Side::Ask => {
             // Taker 卖出, Maker 买入
@@ -118,7 +145,12 @@ pub fn settle_trade(
             taker.realized_pnl += (price.as_micros() - avg) * vol;
             taker.cash += cost_micros - fee_micros;
             taker.stock -= vol;
-            taker.total_cost -= avg * vol;
+            if taker.stock <= 0 {
+                taker.total_cost = 0;
+            } else {
+                taker.total_cost -=
+                    (taker.total_cost as i128 * vol as i128 / (taker.stock + vol) as i128) as i64;
+            }
 
             let maker = &mut agents[maker_id as usize];
             maker.cash -= cost_micros + fee_micros;
@@ -171,19 +203,29 @@ pub fn update_order_books_trade(
 
     // Maker 侧: pending 更新
     let maker = &mut agents[maker_agent_id as usize];
-    maker.order_book.last_fills.push(fill_maker);
+    let maker_book = Arc::make_mut(&mut maker.order_book);
+    maker_book.last_fills.push(fill_maker);
 
     let maker_oid = maker_order_id as i64;
-    if let Some(pos) = maker
-        .order_book
+    if let Some(pos) = maker_book
         .pending
         .iter()
         .position(|p| p.order_id == maker_oid)
     {
-        maker.order_book.pending[pos].remaining -= vol;
-        if maker.order_book.pending[pos].remaining <= 0 {
-            let removed = maker.order_book.pending.swap_remove(pos);
-            maker.order_book.history.push(HistoricalOrder {
+        // 释放 Maker 锁定的资金/股票 (Taker 因为没 Placed，不需要释放)
+        let maker_locked_price = maker_book.pending[pos].price;
+        if taker_side == Side::Bid {
+            // Taker Bid = Maker Sold Stock
+            maker.locked_stock -= vol;
+        } else {
+            // Taker Ask = Maker Bought Stock
+            maker.locked_cash -= vol * maker_locked_price;
+        }
+
+        maker_book.pending[pos].remaining -= vol;
+        if maker_book.pending[pos].remaining <= 0 {
+            let removed = maker_book.pending.swap_remove(pos);
+            maker_book.history.push_back(HistoricalOrder {
                 order_id: removed.order_id,
                 side: removed.side,
                 price: removed.price,
@@ -193,12 +235,16 @@ pub fn update_order_books_trade(
                 placed_tick: removed.placed_tick,
                 closed_tick: tick,
             });
+            while maker_book.history.len() > 200 {
+                maker_book.history.pop_front();
+            }
         }
     }
 
     // Taker 侧
     let taker = &mut agents[taker_agent_id as usize];
-    taker.order_book.last_fills.push(fill_taker);
+    let taker_book = Arc::make_mut(&mut taker.order_book);
+    taker_book.last_fills.push(fill_taker);
 }
 
 /// 处理 Placed 事件
@@ -206,20 +252,33 @@ pub fn update_order_books_placed(
     agent: &mut AgentState,
     order_id: u64,
     price: Price,
+    amount: Vol,
     remaining: Vol,
     side: Side,
     tick: i64,
 ) {
-    agent.order_book.pending.push(PendingOrder {
+    let book = Arc::make_mut(&mut agent.order_book);
+    book.pending.push(PendingOrder {
         order_id: order_id as i64,
         side: match side {
             Side::Bid => 1,
             Side::Ask => -1,
         },
         price: price.as_micros(),
+        amount: amount.as_u64() as i64,
         remaining: remaining.as_u64() as i64,
         placed_tick: tick,
     });
+
+    // 冻结资金或股票
+    match side {
+        Side::Bid => {
+            agent.locked_cash += (price.as_micros() as i128 * remaining.as_u64() as i128) as i64;
+        }
+        Side::Ask => {
+            agent.locked_stock += remaining.as_u64() as i64;
+        }
+    }
 }
 
 /// 处理 Cancelled 事件
@@ -230,14 +289,17 @@ pub fn update_order_books_cancelled(agents: &mut [AgentState], order_id: u64, ti
         return;
     }
     let agent = &mut agents[owner as usize];
-    if let Some(pos) = agent
-        .order_book
-        .pending
-        .iter()
-        .position(|p| p.order_id == oid)
-    {
-        let removed = agent.order_book.pending.swap_remove(pos);
-        agent.order_book.history.push(HistoricalOrder {
+    let book = Arc::make_mut(&mut agent.order_book);
+    if let Some(pos) = book.pending.iter().position(|p| p.order_id == oid) {
+        let removed = book.pending.swap_remove(pos);
+
+        // 释放资金/股票
+        if removed.side == 1 {
+            agent.locked_cash -= removed.price * removed.remaining;
+        } else if removed.side == -1 {
+            agent.locked_stock -= removed.remaining;
+        }
+        book.history.push_back(HistoricalOrder {
             order_id: oid,
             side: removed.side,
             price: removed.price,
@@ -247,6 +309,74 @@ pub fn update_order_books_cancelled(agents: &mut [AgentState], order_id: u64, ti
             placed_tick: removed.placed_tick,
             closed_tick: tick,
         });
+        while book.history.len() > 200 {
+            book.history.pop_front();
+        }
+    }
+}
+
+/// 处理 SelfTradeCancelled 事件 (防自成交对敲：部分撤回挂单)
+pub fn update_order_books_self_trade_cancelled(
+    agents: &mut [AgentState],
+    maker_order_id: u64,
+    taker_order_id: u64,
+    consumed: Vol,
+    tick: i64,
+) {
+    let vol = consumed.as_u64() as i64;
+
+    // 处理 Maker 的部分撤销
+    let m_oid = maker_order_id as i64;
+    let maker_agent = (m_oid >> 32) as u32;
+    if (maker_agent as usize) < agents.len() {
+        let agent = &mut agents[maker_agent as usize];
+        let book = Arc::make_mut(&mut agent.order_book);
+        if let Some(pos) = book.pending.iter().position(|p| p.order_id == m_oid) {
+            // 释放部分被相互抵消(撤回)的资金/股票
+            if book.pending[pos].side == 1 {
+                agent.locked_cash -= book.pending[pos].price * vol;
+            } else if book.pending[pos].side == -1 {
+                agent.locked_stock -= vol;
+            }
+
+            book.pending[pos].remaining -= vol;
+            if book.pending[pos].remaining <= 0 {
+                let removed = book.pending.swap_remove(pos);
+                book.history.push_back(HistoricalOrder {
+                    order_id: m_oid,
+                    side: removed.side,
+                    price: removed.price,
+                    amount: removed.remaining + vol,
+                    filled: 0,
+                    status: 1, // cancelled
+                    placed_tick: removed.placed_tick,
+                    closed_tick: tick,
+                });
+                while book.history.len() > 200 {
+                    book.history.pop_front();
+                }
+            }
+        }
+    }
+
+    // Taker: 仅仅记录历史中的被拒部分
+    let t_oid = taker_order_id as i64;
+    let taker_agent = (t_oid >> 32) as u32;
+    if (taker_agent as usize) < agents.len() {
+        let book = Arc::make_mut(&mut agents[taker_agent as usize].order_book);
+        book.history.push_back(HistoricalOrder {
+            order_id: t_oid,
+            side: 0,
+            price: 0,
+            amount: vol,
+            filled: 0,
+            status: 2, // rejected
+            placed_tick: tick,
+            closed_tick: tick,
+        });
+        while book.history.len() > 200 {
+            book.history.pop_front();
+        }
     }
 }
 
@@ -257,24 +387,26 @@ pub fn update_order_books_rejected(agents: &mut [AgentState], order_id: u64, tic
     if (owner as usize) >= agents.len() {
         return;
     }
-    agents[owner as usize]
-        .order_book
-        .history
-        .push(HistoricalOrder {
-            order_id: oid,
-            side: 0,
-            price: 0,
-            amount: 0,
-            filled: 0,
-            status: 2, // rejected
-            placed_tick: tick,
-            closed_tick: tick,
-        });
+    let book = Arc::make_mut(&mut agents[owner as usize].order_book);
+    book.history.push_back(HistoricalOrder {
+        order_id: oid,
+        side: 0,
+        price: 0,
+        amount: 0,
+        filled: 0,
+        status: 2, // rejected
+        placed_tick: tick,
+        closed_tick: tick,
+    });
+    while book.history.len() > 200 {
+        book.history.pop_front();
+    }
 }
 
 /// Simulation 层拒绝：将非法订单记入 history
 pub fn record_sim_rejection(agent: &mut AgentState, order_id: i64, tick: i64) {
-    agent.order_book.history.push(HistoricalOrder {
+    let book = Arc::make_mut(&mut agent.order_book);
+    book.history.push_back(HistoricalOrder {
         order_id,
         side: 0,
         price: 0,
@@ -284,6 +416,9 @@ pub fn record_sim_rejection(agent: &mut AgentState, order_id: i64, tick: i64) {
         placed_tick: tick,
         closed_tick: tick,
     });
+    while book.history.len() > 200 {
+        book.history.pop_front();
+    }
 }
 
 // ============================================================================
@@ -309,6 +444,8 @@ mod tests {
         let ast = engine.compile("fn on_tick() {}").unwrap();
         let mut a = AgentState::new(id, Arc::new(ast), 42, cash, stock);
         a.total_cost = stock * 100_000_000; // 假设均价 100.00
+        a.locked_cash = 0;
+        a.locked_stock = 0;
         a
     }
 
@@ -321,7 +458,7 @@ mod tests {
             amount: 0,
         };
         assert_eq!(
-            validate_action(&agent, &action),
+            validate_action(&agent, &action, 3, 100_000_000),
             Err(SimRejectReason::ZeroAmount)
         );
     }
@@ -335,7 +472,7 @@ mod tests {
             amount: 50,
         };
         assert_eq!(
-            validate_action(&agent, &action),
+            validate_action(&agent, &action, 3, 100_000_000),
             Err(SimRejectReason::InsufficientStock)
         );
     }
@@ -349,7 +486,7 @@ mod tests {
             amount: 10,         // 需要 1000 元
         };
         assert_eq!(
-            validate_action(&agent, &action),
+            validate_action(&agent, &action, 3, 100_000_000),
             Err(SimRejectReason::InsufficientCash)
         );
     }
@@ -362,7 +499,7 @@ mod tests {
             price: 100_000_000,
             amount: 10,
         };
-        assert!(validate_action(&agent, &action).is_ok());
+        assert!(validate_action(&agent, &action, 3, 100_000_000).is_ok());
     }
 
     #[test]
@@ -389,5 +526,77 @@ mod tests {
         assert_eq!(agents[1].cash, 10_000_000_000 - 1_000_000_000 - 300_000);
         assert_eq!(agents[0].stock, 90);
         assert_eq!(agents[0].cash, 10_000_000_000 + 1_000_000_000 - 300_000);
+    }
+
+    #[test]
+    fn test_locked_cash_stock_tracking() {
+        let mut agents = vec![
+            make_agent(0, 10_000_000_000, 100), // maker
+            make_agent(1, 10_000_000_000, 100), // taker
+        ];
+
+        // 1. Maker places a Bid (Lock cash)
+        update_order_books_placed(
+            &mut agents[0],
+            1,
+            Price(100_000_000), // 100.00
+            Vol(10),
+            Vol(10),
+            Side::Bid,
+            1,
+        );
+        assert_eq!(agents[0].locked_cash, 1_000_000_000); // 100 * 10
+        assert_eq!(agents[0].locked_stock, 0);
+
+        // 2. Maker places an Ask (Lock stock)
+        update_order_books_placed(
+            &mut agents[0],
+            2,
+            Price(105_000_000), // 105.00
+            Vol(20),
+            Vol(20),
+            Side::Ask,
+            1,
+        );
+        assert_eq!(agents[0].locked_cash, 1_000_000_000);
+        assert_eq!(agents[0].locked_stock, 20);
+
+        // 3. Taker hits Maker's Bid (Maker Buys Stock, releases locked cash)
+        update_order_books_trade(
+            &mut agents,
+            1, // maker_order_id
+            3, // taker_order_id
+            0, // maker_agent_id
+            1, // taker_agent_id
+            Price(100_000_000),
+            Vol(5),    // Partial fill of 5
+            Side::Ask, // Taker is Ask => Maker is Bid
+            2,
+        );
+        // Cash lock should decrease by 100_000_000 * 5 = 500_000_000
+        assert_eq!(agents[0].locked_cash, 500_000_000);
+        assert_eq!(agents[0].locked_stock, 20); // Unchanged
+
+        // 4. Cancel the remaining Maker bid
+        update_order_books_cancelled(&mut agents, 1, 3);
+        assert_eq!(agents[0].locked_cash, 0); // Released remaining 500_000_000
+
+        // 5. Taker hits Maker's Ask (Maker Sells Stock, releases locked stock)
+        update_order_books_trade(
+            &mut agents,
+            2, // maker_order_id
+            4, // taker_order_id
+            0, // maker_agent_id
+            1, // taker_agent_id
+            Price(105_000_000),
+            Vol(20),   // Full fill
+            Side::Bid, // Taker is Bid => Maker is Ask
+            4,
+        );
+        assert_eq!(agents[0].locked_stock, 0); // Released all 20 stock lock
+
+        // Assert all locks are perfectly 0 at the end
+        assert_eq!(agents[0].locked_cash, 0);
+        assert_eq!(agents[0].locked_stock, 0);
     }
 }

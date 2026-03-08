@@ -53,6 +53,8 @@ pub enum RecordEvent {
         agent_id: u32,
         cash: i64,
         stock: i64,
+        locked_cash: i64,
+        locked_stock: i64,
         equity: i64,
         realized_pnl: i64,
         unrealized_pnl: i64,

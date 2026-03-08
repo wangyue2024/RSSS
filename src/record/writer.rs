@@ -29,13 +29,10 @@ impl RecordWriter {
             market_w,
             "tick,price,volume,buy_vol,sell_vol,bid1_px,bid1_vol,ask1_px,ask1_vol,ma5,ma20,ma60,rsi14,atr14,vwap,stddev,imbalance"
         )?;
-        writeln!(
-            trades_w,
-            "tick,maker_id,taker_id,price,amount,taker_side"
-        )?;
+        writeln!(trades_w, "tick,maker_id,taker_id,price,amount,taker_side")?;
         writeln!(
             agents_w,
-            "tick,agent_id,cash,stock,equity,realized_pnl,unrealized_pnl,pending_orders"
+            "tick,agent_id,cash,stock,locked_cash,locked_stock,equity,realized_pnl,unrealized_pnl,pending_orders"
         )?;
 
         Ok(Self {
@@ -50,22 +47,53 @@ impl RecordWriter {
         while let Ok(event) = rx.recv() {
             match event {
                 RecordEvent::MarketTick {
-                    tick, price, volume, buy_volume, sell_volume,
-                    bid1_price, bid1_vol, ask1_price, ask1_vol,
-                    ma_5, ma_20, ma_60, rsi_14, atr_14, vwap, std_dev,
+                    tick,
+                    price,
+                    volume,
+                    buy_volume,
+                    sell_volume,
+                    bid1_price,
+                    bid1_vol,
+                    ask1_price,
+                    ask1_vol,
+                    ma_5,
+                    ma_20,
+                    ma_60,
+                    rsi_14,
+                    atr_14,
+                    vwap,
+                    std_dev,
                     order_imbalance,
                 } => {
                     let _ = writeln!(
                         self.market_w,
                         "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-                        tick, price, volume, buy_volume, sell_volume,
-                        bid1_price, bid1_vol, ask1_price, ask1_vol,
-                        ma_5, ma_20, ma_60, rsi_14, atr_14, vwap, std_dev,
+                        tick,
+                        price,
+                        volume,
+                        buy_volume,
+                        sell_volume,
+                        bid1_price,
+                        bid1_vol,
+                        ask1_price,
+                        ask1_vol,
+                        ma_5,
+                        ma_20,
+                        ma_60,
+                        rsi_14,
+                        atr_14,
+                        vwap,
+                        std_dev,
                         order_imbalance,
                     );
                 }
                 RecordEvent::Trade {
-                    tick, maker_id, taker_id, price, amount, taker_side,
+                    tick,
+                    maker_id,
+                    taker_id,
+                    price,
+                    amount,
+                    taker_side,
                 } => {
                     let _ = writeln!(
                         self.trades_w,
@@ -74,14 +102,30 @@ impl RecordWriter {
                     );
                 }
                 RecordEvent::AgentSnapshot {
-                    tick, agent_id, cash, stock, equity,
-                    realized_pnl, unrealized_pnl, pending_orders,
+                    tick,
+                    agent_id,
+                    cash,
+                    stock,
+                    locked_cash,
+                    locked_stock,
+                    equity,
+                    realized_pnl,
+                    unrealized_pnl,
+                    pending_orders,
                 } => {
                     let _ = writeln!(
                         self.agents_w,
-                        "{},{},{},{},{},{},{},{}",
-                        tick, agent_id, cash, stock, equity,
-                        realized_pnl, unrealized_pnl, pending_orders,
+                        "{},{},{},{},{},{},{},{},{},{}",
+                        tick,
+                        agent_id,
+                        cash,
+                        stock,
+                        locked_cash,
+                        locked_stock,
+                        equity,
+                        realized_pnl,
+                        unrealized_pnl,
+                        pending_orders,
                     );
                 }
                 RecordEvent::Done => {

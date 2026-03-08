@@ -123,6 +123,7 @@ impl OrderBook {
     /// 3. 市价单剩余量直接丢弃 (IOC)
     pub fn process_order(&mut self, order: Order) -> Vec<MatchEvent> {
         self.stats.total_orders += 1;
+        let original_amount = order.amount;
         let mut events = Vec::new();
         let mut taker = order;
 
@@ -142,19 +143,18 @@ impl OrderBook {
                     events.push(MatchEvent::Placed {
                         order_id: taker.id,
                         price: taker.price,
+                        amount: original_amount,
                         remaining: taker.amount,
                         side: taker.side,
                     });
                 }
                 OrderType::Market => {
-                    // IOC: 市价单剩余量直接丢弃
-                    if events.is_empty() {
-                        self.stats.total_rejects += 1;
-                        events.push(MatchEvent::Rejected {
-                            order_id: taker.id,
-                            reason: RejectReason::InsufficientLiquidity,
-                        });
-                    }
+                    // IOC: 市价单若有剩余未成交量，直接丢弃并反馈 Rejected
+                    self.stats.total_rejects += 1;
+                    events.push(MatchEvent::Rejected {
+                        order_id: taker.id,
+                        reason: RejectReason::InsufficientLiquidity,
+                    });
                 }
             }
         }
@@ -357,6 +357,40 @@ impl OrderBook {
                 }
             }
         };
+
+        // 3.5 阻止自我成交 (Self-Trade)
+        if taker.agent_id == maker.agent_id {
+            // 不产生 Trade 事件，直接抵消双方的委托量
+            let consumed = taker.amount.min(maker.amount);
+            let queue = opponent_book.get_mut(&best_price).unwrap();
+            queue.deduct_volume(maker.amount);
+
+            let maker_remaining = maker.amount - consumed;
+            if maker_remaining > Vol::ZERO {
+                let mut remaining_maker = maker;
+                remaining_maker.amount = maker_remaining;
+                queue.push_front(remaining_maker);
+                if let Some(meta) = self.order_index.get_mut(&maker.id) {
+                    meta.amount = maker_remaining;
+                }
+            } else {
+                self.order_index.remove(&maker.id);
+                if queue.is_empty() {
+                    opponent_book.remove(&best_price);
+                }
+            }
+            taker.amount -= consumed;
+
+            // FIX: 发送 SelfTradeCancelled 事件，仅减少挂单的相应数量
+            events.push(MatchEvent::SelfTradeCancelled {
+                maker_order_id: maker.id,
+                taker_order_id: taker.id,
+                consumed,
+            });
+            self.stats.total_rejects += 1;
+
+            return true;
+        }
 
         // 4. 计算成交量
         let trade_amount = taker.amount.min(maker.amount);

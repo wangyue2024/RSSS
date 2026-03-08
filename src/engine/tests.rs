@@ -46,7 +46,7 @@ fn market_bid(id: u64, amount: u64, agent_id: u32) -> Order {
     }
 }
 
-/// 快速创建市价卖单
+#[allow(dead_code)]
 fn market_ask(id: u64, amount: u64, agent_id: u32) -> Order {
     Order {
         id,
@@ -73,6 +73,7 @@ fn test_post_to_book() {
         vec![MatchEvent::Placed {
             order_id: 1,
             price: Price(100_000_000),
+            amount: Vol(50),
             remaining: Vol(50),
             side: Side::Bid,
         }]
@@ -84,6 +85,7 @@ fn test_post_to_book() {
         vec![MatchEvent::Placed {
             order_id: 2,
             price: Price(100_000_000),
+            amount: Vol(30),
             remaining: Vol(30),
             side: Side::Bid,
         }]
@@ -187,9 +189,10 @@ fn test_partial_taker_remaining() {
         MatchEvent::Placed {
             order_id: 2,
             price,
+            amount,
             remaining,
             side: Side::Bid,
-        } if *price == Price(100_000_000) && *remaining == Vol(20)
+        } if *price == Price(100_000_000) && *remaining == Vol(20) && *amount == Vol(50)
     ));
 
     // 验证买盘挂了 20 股
@@ -306,9 +309,16 @@ fn test_market_order_partial_ioc() {
     // 市价买入 50 股 → 成交 20, 剩余 30 直接丢弃 (IOC)
     let events = book.process_order(market_bid(2, 50, 2));
 
-    // 应该只有 1 个 Trade (不是 Rejected，因为部分成交了)
-    assert_eq!(events.len(), 1);
+    // 应该有 2 个事件 (1个 Trade, 1个 Rejected)
+    assert_eq!(events.len(), 2);
     assert!(matches!(&events[0], MatchEvent::Trade { amount, .. } if *amount == Vol(20)));
+    assert!(matches!(
+        &events[1],
+        MatchEvent::Rejected {
+            order_id: 2,
+            reason: RejectReason::InsufficientLiquidity
+        }
+    ));
 }
 
 // ============================================================================
@@ -460,6 +470,7 @@ fn test_no_cross_no_trade() {
         vec![MatchEvent::Placed {
             order_id: 2,
             price: Price(101_000_000),
+            amount: Vol(50),
             remaining: Vol(50),
             side: Side::Ask,
         }]
@@ -516,9 +527,10 @@ fn test_mixed_scenario() {
         MatchEvent::Placed {
             order_id: 4,
             price,
+            amount,
             remaining,
             side: Side::Bid,
-        } if *price == Price(103_000_000) && *remaining == Vol(50)
+        } if *price == Price(103_000_000) && *remaining == Vol(50) && *amount == Vol(250)
     )));
 
     // 验证买盘

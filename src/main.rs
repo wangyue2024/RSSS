@@ -266,6 +266,8 @@ fn main() {
                                 strategy_idx: a.id as usize % num_scripts.max(1),
                                 cash: a.cash,
                                 stock: a.stock,
+                                locked_cash: a.locked_cash,
+                                locked_stock: a.locked_stock,
                                 equity,
                                 realized_pnl: a.realized_pnl,
                             }

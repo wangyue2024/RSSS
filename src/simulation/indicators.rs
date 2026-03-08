@@ -16,8 +16,9 @@ pub struct IndicatorEngine {
     sum_60: i64,
 
     // VWAP
-    vwap_numer: i128, // Σ(price × volume)
-    vwap_denom: i64,  // Σ(volume)
+    vwap_numer: i128,                    // Σ(price × volume)
+    vwap_denom: i64,                     // Σ(volume)
+    vwap_history: VecDeque<(i128, i64)>, // (numer, denom) per tick
 
     // RSI 指数移动平均
     avg_gain_14: i64, // ×10000 精度
@@ -49,6 +50,7 @@ impl IndicatorEngine {
             atr_14_sum: 0,
             atr_count: 0,
             last_price: initial_price,
+            vwap_history: VecDeque::with_capacity(window + 1),
         }
     }
 
@@ -72,10 +74,13 @@ impl IndicatorEngine {
         }
 
         // VWAP 累加
+        let n = price as i128 * volume as i128;
+        let d = volume;
         if volume > 0 {
-            self.vwap_numer += price as i128 * volume as i128;
-            self.vwap_denom += volume;
+            self.vwap_numer += n;
+            self.vwap_denom += d;
         }
+        self.vwap_history.push_back((n, d));
 
         // RSI: 增量移动平均
         let change = price - prev;
@@ -117,6 +122,12 @@ impl IndicatorEngine {
         }
         while self.volumes.len() > self.window {
             self.volumes.pop_front();
+        }
+        while self.vwap_history.len() > self.window {
+            if let Some((n, d)) = self.vwap_history.pop_front() {
+                self.vwap_numer -= n;
+                self.vwap_denom -= d;
+            }
         }
     }
 

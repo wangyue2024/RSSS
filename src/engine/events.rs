@@ -30,11 +30,18 @@ pub enum MatchEvent {
     Placed {
         order_id: u64,
         price: Price,
-        remaining: Vol,
+        amount: Vol,    // 原始挂单量
+        remaining: Vol, // 剩余挂入盘口的量
         side: Side,
     },
     /// 撤单成功：基于影子撤单机制
     Cancelled { order_id: u64 },
+    /// 自我成交拦截：部分撤销挂单量，剩余挂单继续留在盘口
+    SelfTradeCancelled {
+        maker_order_id: u64,
+        taker_order_id: u64,
+        consumed: Vol,
+    },
     /// 订单被拒绝
     Rejected { order_id: u64, reason: RejectReason },
 }
@@ -46,4 +53,6 @@ pub enum RejectReason {
     OrderNotFound,
     /// 市价单无对手盘流动性
     InsufficientLiquidity,
+    /// 订单因自我成交被取消 (防刷单)
+    SelfTrade,
 }

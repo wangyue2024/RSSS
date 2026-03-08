@@ -371,6 +371,7 @@ fn test_order_book_queries() {
                 order_id: 1,
                 side: 1,
                 price: 100_000_000,
+                amount: 50,
                 remaining: 50,
                 placed_tick: 0,
             },
@@ -378,6 +379,7 @@ fn test_order_book_queries() {
                 order_id: 2,
                 side: -1,
                 price: 101_000_000,
+                amount: 30,
                 remaining: 30,
                 placed_tick: 1,
             },
@@ -388,7 +390,7 @@ fn test_order_book_queries() {
             fill_amount: 20,
             side: 1,
         }],
-        history: vec![],
+        history: std::collections::VecDeque::new(),
     };
 
     let mut scope = Scope::new();

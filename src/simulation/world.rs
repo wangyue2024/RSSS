@@ -19,8 +19,8 @@ use super::config::SimConfig;
 use super::indicators::IndicatorEngine;
 use super::settlement::{
     record_sim_rejection, settle_trade, taker_side_from_action, update_order_books_cancelled,
-    update_order_books_placed, update_order_books_rejected, update_order_books_trade,
-    validate_action,
+    update_order_books_placed, update_order_books_rejected,
+    update_order_books_self_trade_cancelled, update_order_books_trade, validate_action,
 };
 
 /// 全局仿真状态
@@ -119,11 +119,6 @@ impl World {
         // Phase 1: Pre-Calculation (主线程)
         // ═══════════════════════════════════════════
 
-        // 1a. 清空上 Tick 的 last_fills
-        for agent in &mut self.agents {
-            agent.order_book.last_fills.clear();
-        }
-
         // 1a2. 清空上 Tick 的 trade 记录
         self.last_tick_trades.clear();
 
@@ -169,6 +164,13 @@ impl World {
         all_actions.shuffle(&mut self.global_rng);
 
         // ═══════════════════════════════════════════
+        // Phase 4.5: Clean previous fills before new execution
+        // ═══════════════════════════════════════════
+        for agent in &mut self.agents {
+            Arc::make_mut(&mut agent.order_book).last_fills.clear();
+        }
+
+        // ═══════════════════════════════════════════
         // Phase 5: Execution + Settlement (主线程, 串行)
         // ═══════════════════════════════════════════
         let trading_enabled = tick >= self.config.warmup_ticks;
@@ -180,7 +182,12 @@ impl World {
 
             // 前置校验
             if !matches!(action, AgentAction::Cancel { .. }) {
-                if let Err(_reason) = validate_action(&self.agents[*agent_id as usize], action) {
+                if let Err(_reason) = validate_action(
+                    &self.agents[*agent_id as usize],
+                    action,
+                    self.config.fee_rate_bps,
+                    self.indicators.last_price(),
+                ) {
                     // 拒绝: 记入 history
                     let oid = match action {
                         AgentAction::LimitBuy { order_id, .. }
@@ -195,7 +202,6 @@ impl World {
                 }
             }
 
-            // 执行
             match action {
                 AgentAction::Cancel { order_id } => {
                     let event = self.order_book.cancel_order(*order_id as u64);
@@ -204,9 +210,74 @@ impl World {
                 _ => {
                     if let Some(order) = convert_action(action, *agent_id) {
                         let taker_side = taker_side_from_action(action);
+                        let original_amount = order.amount.as_u64() as i64;
+                        let original_price = order.price.as_micros();
+                        let order_id = order.id as i64;
+
                         let events = self.order_book.process_order(order);
+
+                        let mut placed = false;
+                        let mut filled = 0;
+
                         for event in &events {
+                            match event {
+                                MatchEvent::Trade {
+                                    taker_order_id,
+                                    amount,
+                                    ..
+                                } => {
+                                    if *taker_order_id == order_id as u64 {
+                                        filled += amount.as_u64() as i64;
+                                    }
+                                }
+                                MatchEvent::Placed { .. } => {
+                                    placed = true;
+                                }
+                                MatchEvent::SelfTradeCancelled {
+                                    consumed,
+                                    maker_order_id,
+                                    taker_order_id,
+                                } => {
+                                    // 自成交按规则属于取消，不属于真实成交(filled)。如果需要也可以加在独立字段，由于要求严格生命周期，这里不记为 filled。
+                                }
+                                _ => {}
+                            }
                             self.process_event(event, *agent_id, taker_side, tick);
+                        }
+
+                        // 如果订单没有 Placed（全部成交，或市价单全部/部分被拒等，总之一回合结束寿命）
+                        if !placed {
+                            let status = if filled >= original_amount {
+                                0 // fully filled
+                            } else if filled > 0 {
+                                1 // partially filled (and rejected/cancelled)
+                            } else {
+                                2 // completely rejected
+                            };
+
+                            let agent = &mut self.agents[*agent_id as usize];
+                            let book = Arc::make_mut(&mut agent.order_book);
+
+                            // 由于 `process_event` 可能内部调用过 `update_order_books_rejected`，会产生占位空记录。这里清理一下。
+                            book.history.retain(|h| h.order_id != order_id);
+
+                            book.history
+                                .push_back(crate::scripting::api::HistoricalOrder {
+                                    order_id,
+                                    side: match taker_side {
+                                        Side::Bid => 1,
+                                        Side::Ask => -1,
+                                    },
+                                    price: original_price,
+                                    amount: original_amount,
+                                    filled,
+                                    status,
+                                    placed_tick: tick,
+                                    closed_tick: tick,
+                                });
+                            while book.history.len() > 200 {
+                                book.history.pop_front();
+                            }
                         }
                     }
                 }
@@ -293,15 +364,32 @@ impl World {
             MatchEvent::Placed {
                 order_id,
                 price,
+                amount,
                 remaining,
                 side,
             } => {
                 let agent = &mut self.agents[taker_agent_id as usize];
-                update_order_books_placed(agent, *order_id, *price, *remaining, *side, tick);
+                update_order_books_placed(
+                    agent, *order_id, *price, *amount, *remaining, *side, tick,
+                );
             }
 
             MatchEvent::Cancelled { order_id } => {
                 update_order_books_cancelled(&mut self.agents, *order_id, tick);
+            }
+
+            MatchEvent::SelfTradeCancelled {
+                maker_order_id,
+                taker_order_id,
+                consumed,
+            } => {
+                update_order_books_self_trade_cancelled(
+                    &mut self.agents,
+                    *maker_order_id,
+                    *taker_order_id,
+                    *consumed,
+                    tick,
+                );
             }
 
             MatchEvent::Rejected { order_id, .. } => {

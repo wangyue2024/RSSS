@@ -110,6 +110,8 @@ impl Recorder {
                 agent_id: agent.id,
                 cash: agent.cash,
                 stock: agent.stock,
+                locked_cash: agent.locked_cash,
+                locked_stock: agent.locked_stock,
                 equity,
                 realized_pnl: agent.realized_pnl,
                 unrealized_pnl: unrealized,
