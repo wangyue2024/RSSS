@@ -7,6 +7,9 @@ use rhai::{Scope, AST};
 use crate::scripting::api::{AccountView, ActionMailbox, AgentAction, AgentOrderBook};
 use crate::scripting::rng::AgentRng;
 
+/// 连续错误熔断阈值
+const MAX_CONSECUTIVE_ERRORS: u32 = 3;
+
 /// Agent 运行时状态
 ///
 /// 包含经济状态 (cash/stock)、Rhai 运行时 (AST/Scope/RNG)、订单跟踪。
@@ -29,6 +32,13 @@ pub struct AgentState {
 
     // — 订单跟踪 —
     pub order_book: Arc<AgentOrderBook>,
+
+    // — 熔断机制 —
+    pub error_count: u32,
+    pub disabled: bool,
+
+    // — 订单 ID 计数器 (跨 Tick 持久化，保证全局唯一) —
+    pub order_counter: u32,
 }
 
 impl AgentState {
@@ -53,6 +63,9 @@ impl AgentState {
             rng: AgentRng::new(global_seed, id),
             initialized: false,
             order_book: Arc::new(AgentOrderBook::default()),
+            error_count: 0,
+            disabled: false,
+            order_counter: 0,
         }
     }
 
@@ -88,6 +101,11 @@ impl AgentState {
         engine: &rhai::Engine,
         market: Arc<crate::scripting::api::MarketState>,
     ) {
+        // 熔断: 已禁用的 agent 跳过执行
+        if self.disabled {
+            return;
+        }
+
         let account = self.build_account_view(market.price);
 
         // 注入只读数据
@@ -95,18 +113,38 @@ impl AgentState {
         self.scope.set_value("account", account);
         self.scope
             .set_value("my_orders", Arc::clone(&self.order_book));
-        self.scope.set_value("orders", ActionMailbox::new(self.id));
+        self.scope
+            .set_value("orders", ActionMailbox::new(self.id, self.order_counter));
 
         // 首次: 执行顶层代码 + 注入 RNG
         if !self.initialized {
             self.scope.push("rng", self.rng.clone());
-            let _ = engine.run_ast_with_scope(&mut self.scope, &self.ast);
+            match engine.run_ast_with_scope(&mut self.scope, &self.ast) {
+                Ok(_) => {}
+                Err(e) => {
+                    self.disabled = true;
+                    eprintln!("Agent {} DISABLED (init error): {}", self.id, e);
+                    return;
+                }
+            }
             self.initialized = true;
         }
 
         // 执行 on_tick (用 Dynamic 接收任意返回值)
-        if let Err(e) = engine.call_fn::<rhai::Dynamic>(&mut self.scope, &self.ast, "on_tick", ()) {
-            eprintln!("Agent {} script error: {}", self.id, e);
+        match engine.call_fn::<rhai::Dynamic>(&mut self.scope, &self.ast, "on_tick", ()) {
+            Ok(_) => {
+                self.error_count = 0; // 成功则重置计数
+            }
+            Err(e) => {
+                self.error_count += 1;
+                if self.error_count >= MAX_CONSECUTIVE_ERRORS {
+                    self.disabled = true;
+                    eprintln!(
+                        "Agent {} DISABLED after {} consecutive errors: {}",
+                        self.id, self.error_count, e
+                    );
+                }
+            }
         }
 
         // 修复：断开 Rhai Scope 对 my_orders (Arc<AgentOrderBook>) 的持有
@@ -119,11 +157,14 @@ impl AgentState {
         }
     }
 
-    /// 取回本 Tick 的 actions
+    /// 取回本 Tick 的 actions，同时回收 counter
     pub fn take_actions(&mut self) -> Vec<AgentAction> {
         self.scope
             .get_value::<ActionMailbox>("orders")
-            .map(|m| m.actions)
+            .map(|m| {
+                self.order_counter = m.counter();
+                m.actions
+            })
             .unwrap_or_default()
     }
 }

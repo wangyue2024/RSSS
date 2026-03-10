@@ -149,7 +149,7 @@ fn test_submit_orders() {
         .unwrap();
 
     let mut scope = Scope::new();
-    scope.push("orders", ActionMailbox::new(7));
+    scope.push("orders", ActionMailbox::new(7, 0));
 
     let _ = engine.call_fn::<()>(&mut scope, &ast, "on_tick", ());
 
@@ -488,7 +488,7 @@ fn test_full_agent_lifecycle() {
         scope.set_value("market", Arc::new(market));
         scope.set_value("account", make_account());
         scope.set_value("my_orders", Arc::new(AgentOrderBook::default()));
-        scope.set_value("orders", ActionMailbox::new(0));
+        scope.set_value("orders", ActionMailbox::new(0, 0));
 
         let count = engine
             .call_fn::<i64>(&mut scope, &ast, "on_tick", ())

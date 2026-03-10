@@ -52,33 +52,41 @@ pub struct World {
 
 impl World {
     /// 构建完整世界
-    pub fn new(config: SimConfig, scripts: Vec<String>) -> Result<Self, String> {
+    ///
+    /// `scripts`: Vec<(source_code, script_name)>
+    /// MM 类策略（名字包含 "market_maker" 或 "_mm"）获得 5x 资金和底仓
+    pub fn new(config: SimConfig, scripts: Vec<(String, String)>) -> Result<Self, String> {
         let rhai_engine = crate::scripting::build_engine();
 
-        // 编译并校验脚本
-        let mut compiled: Vec<Arc<rhai::AST>> = Vec::new();
-        for (i, src) in scripts.iter().enumerate() {
+        // 编译并校验脚本，保留名字用于 MM 识别
+        let mut compiled: Vec<(Arc<rhai::AST>, bool)> = Vec::new(); // (ast, is_mm)
+        for (i, (src, name)) in scripts.iter().enumerate() {
             let ast = sandbox::compile_and_validate(&rhai_engine, src)
                 .map_err(|e| format!("Script {} compile error: {}", i, e))?;
-            compiled.push(Arc::new(ast));
+            let is_mm = name.contains("market_maker") || name.contains("_mm");
+            compiled.push((Arc::new(ast), is_mm));
         }
 
         // 创建 Agents
+        let mm_cash_multiplier: i64 = 5;
+        let mm_stock_multiplier: i64 = 5;
         let mut agents = Vec::with_capacity(config.num_agents as usize);
         for id in 0..config.num_agents {
             let ast_idx = id as usize % compiled.len().max(1);
-            let ast = if compiled.is_empty() {
-                // 无脚本: 创建空 AST
-                Arc::new(rhai_engine.compile("fn on_tick() {}").unwrap())
+            let (ast, is_mm) = if compiled.is_empty() {
+                (Arc::new(rhai_engine.compile("fn on_tick() {}").unwrap()), false)
             } else {
-                Arc::clone(&compiled[ast_idx])
+                let (ref a, mm) = compiled[ast_idx];
+                (Arc::clone(a), mm)
             };
+            let cash = if is_mm { config.initial_cash * mm_cash_multiplier } else { config.initial_cash };
+            let stock = if is_mm { config.initial_stock * mm_stock_multiplier } else { config.initial_stock };
             agents.push(AgentState::new(
                 id,
                 ast,
                 config.global_seed,
-                config.initial_cash,
-                config.initial_stock,
+                cash,
+                stock,
             ));
         }
 

@@ -57,8 +57,7 @@ pub struct MarketState {
 }
 
 impl MarketState {
-    /// 创建一个用于测试的默认状态
-    #[cfg(test)]
+    /// 创建一个用于校验/测试的默认状态
     pub fn test_default() -> Self {
         Self {
             tick: 0,
@@ -198,12 +197,19 @@ pub enum AgentAction {
 
 impl ActionMailbox {
     /// 创建新的空 Mailbox
-    pub fn new(agent_id: u32) -> Self {
+    ///
+    /// `counter_start`: 从上一 Tick 回收的 counter 值，保证跨 Tick ID 全局唯一
+    pub fn new(agent_id: u32, counter_start: u32) -> Self {
         Self {
             actions: Vec::new(),
             agent_id,
-            counter: 0,
+            counter: counter_start,
         }
+    }
+
+    /// 返回当前 counter 值，用于跨 Tick 持久化
+    pub fn counter(&self) -> u32 {
+        self.counter
     }
 
     /// 生成全局唯一 order_id: (agent_id << 32) | counter

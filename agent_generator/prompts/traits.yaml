@@ -1,0 +1,23 @@
+# Personality Traits & Quirks for Agent Heterogeneity
+# These traits are injected into the Prompt to mutate the generated logic.
+
+traits:
+  # Risk & Sizing Traits
+  - "Heavily Risk-Seeking: Use RNG to initialize a very large `lot_size`, frequently betting up to 50% of available cash in a single trade."
+  - "Risk-Averse: Extremely conservative. Initialize `lot_size` using RNG to be less than 5% of total capital. Refuses to trade if `market.std_dev` is high."
+  - "Martingale Sizer: If the last trade was a loss (determined by tracking average cost vs current price), double the `lot_size` for the next trade."
+  
+  # Timing & Frequency Traits
+  - "High-Frequency Canceler: Impatient. If its limit order is not filled within 3 ticks, it strictly cancels it and replaces it."
+  - "Lazy Trader: Only evaluates the market and makes decisions once every 50 ticks (use modulo on `market.tick`)."
+  - "Morning Person (Time-preferenced): Only active and trades during the first 20% of the session. Checks `market.tick < market.total_ticks / 5`."
+
+  # Emotional & Psychological Traits
+  - "Panic-Prone: Has a very tight stop-loss limit. If `account.unrealized_pnl` goes strictly negative past a small RNG threshold, it market-sells everything immediately."
+  - "Stubborn Holder (Diamond Hands): Will absolutely never sell at a loss. It will only place sell orders if the price is strictly greater than `account.avg_cost`."
+  - "FOMO (Fear Of Missing Out): If the price jumps by more than 2% in a very short window, it completely abandons its core strategy and just market buys immediately."
+  
+  # Technical Execution Quirks
+  - "Off-by-One Pumper: Always adds exactly 1 micro (1) to its calculated bid price to jump ahead of other identical algorithms in the queue."
+  - "Round Number Bias: Only likes to place limit orders at 'round' prices. It uses modulo math to round its calculated order price to the nearest integer dollar (nearest 1_000_000 micros)."
+  - "Delayed Reaction: Never acts on current tick data. It saves the price in a global `let` variable and only reacts to data that is 5 ticks old."

@@ -1,0 +1,67 @@
+# 20 Base Trading Strategies (Rhai Generation Prompts)
+
+# Group 1: Market Makers (Liquidity Providers)
+strategies:
+  - name: "pure_market_maker"
+    desc: "A pure market maker. It places limit buy and sell orders at a fixed symmetric distance (spread) from the current `market.price`. It continuously cancels old orders and replays new ones to maintain its position."
+  
+  - name: "inventory_averse_mm"
+    desc: "A market maker that actively manages its inventory (`account.stock`). If inventory is high (e.g., > 1000), it skews its quotes: placing sell orders closer to the market price and buy orders further away. If inventory is negative or 0, it does the opposite."
+    
+  - name: "imbalance_driven_mm"
+    desc: "A market maker that watches `market.order_imbalance`. If the imbalance is highly positive (heavy buy pressure), it shifts both its bid and ask prices upward to avoid adverse selection. If negative, it shifts them downward."
+
+  - name: "volatility_adaptive_mm"
+    desc: "A market maker that adjusts its spread based on `market.std_dev`. When volatility is high, it widens its spread significantly to protect itself. When volatility is low, it narrows the spread to compete for fills."
+
+# Group 2: Trend & Momentum Followers
+  - name: "fast_ma_crossover"
+    desc: "A classic trend follower. It uses `market.ma_5` and `market.ma_20`. It buys at market price when MA_5 crosses above MA_20, and sells all its inventory when MA_5 crosses below MA_20."
+
+  - name: "breakout_sniper"
+    desc: "A breakout strategy. It monitors the current price against `market.high_20`. If the price breaks above the 20-tick high, it aggressively buys. It sets a static stop-loss a few ticks below its average entry price (`account.avg_cost`)."
+
+  - name: "slope_momentum_chaser"
+    desc: "A momentum strategy that uses `math.slope(market.history_prices)`. If the recent price slope is highly positive and accelerating, it buys aggressively. It panic sells if the slope suddenly turns negative."
+
+  - name: "order_flow_follower"
+    desc: "A micro-structural strategy. It entirely ignores price and moving averages. Instead, it looks at `market.buy_volume` and `market.sell_volume`. If `buy_volume` is 3x larger than `sell_volume` in the current tick, it joins the crowd and buys."
+
+  - name: "exhaustion_reversal"
+    desc: "A contrarian momentum strategy. It looks for climax tops. If the price has gone up significantly (high > ma_60) but the current `market.volume` suddenly drops to near zero, it assumes exhaustion and initiates a short/sell position."
+
+# Group 3: Mean Reverters
+  - name: "vwap_pullback"
+    desc: "A mean reversion strategy based on VWAP. If the current price dips significantly below `market.vwap` (defined by a threshold), it buys, expecting a bounce. It sells once the price reverts back to VWAP."
+
+  - name: "bollinger_fader"
+    desc: "A statistical reversion strategy. It calculates bands using `market.ma_20 +/- 2 * market.std_dev`. It places a limit buy order at the lower band and a limit sell order at the upper band."
+
+  - name: "micro_tick_reverter"
+    desc: "A very short-term (1 tick) mean reversion strategy. It assumes tick-by-tick prices are a random walk. If the price drops this tick, it places a limit buy order slightly below the new price. If it rises, it sells."
+
+  - name: "atr_mean_reversion"
+    desc: "It uses `market.atr_14` (Average True Range). It waits for the price to deviate from `market.ma_20` by more than 1.5x ATR. Once deviated, it assumes an over-extension and trades in the opposite direction."
+
+# Group 4: Institutional Execution & Predatory Algos
+  - name: "twap_execution"
+    desc: "Time-Weighted Average Price execution. It has a large target position it wants to accumulate (e.g., 50,000 shares). It ignores price and simply submits a market buy order for a fixed small slice (e.g., 500 shares) every N ticks, until the target is reached."
+
+  - name: "vwap_execution"
+    desc: "Volume-Weighted Average Price execution. It wants to buy a large amount, but its slicing is dynamic. It checks the recent `market.volume`; if the market volume is high, it buys more. If low, it buys less, aiming to blend in."
+
+  - name: "iceberg_placer"
+    desc: "An iceberg order strategy. It wants to sell a massive amount of shares. However, it only places a limit sell order for a very tiny fraction at the best ask price. Once `account.last_order_status` indicates a fill, it immediately replenishes the small order."
+
+  - name: "stop_loss_hunter"
+    desc: "A predatory strategy. It attempts to trigger retail stop losses. If it senses a cluster of orders slightly below the current price, it might aggressively market sell to push the price down through the support, then quickly buy back at the depressed price."
+
+# Group 5: Noise & Exogenous Traders
+  - name: "drunkards_walk"
+    desc: "A purely random noise trader. Every tick, it uses `rng.next_u32() % 100`. If < 5, it buys randomly. If > 95, it sells randomly. The quantity and price offset are also completely random. It provides essential systemic entropy."
+
+  - name: "fat_tail_fat_finger"
+    desc: "A noise trader that mostly does nothing. However, there is a 0.01% chance every tick that it experiences a 'fat finger' error, submitting a market order that is 100x larger than normal, causing an instant flash crash or spike."
+
+  - name: "retail_stop_limit"
+    desc: "A typical retail trader. It enters completely randomly once. Then, it places a strict take-profit limit order 5% above its cost, and a strict stop-loss market order 2% below its cost. It just waits for one of them to hit."

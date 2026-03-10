@@ -20,10 +20,11 @@ fn main() {
 
     // ── 解析命令行参数 ──────────────────────────────
     let mut config = SimConfig::default();
-    let mut scripts_dir = String::from("scripts");
+    let mut scripts_dir = String::from("agent_generator\\output");
     let mut no_tui = false;
     let mut no_record = false;
     let mut output_dir = String::from("output");
+    let mut validate_target: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -67,6 +68,10 @@ fn main() {
             "--no-record" => {
                 no_record = true;
             }
+            "--validate" => {
+                i += 1;
+                validate_target = Some(args[i].clone());
+            }
             "--help" | "-h" => {
                 print_usage();
                 return;
@@ -84,7 +89,13 @@ fn main() {
         i += 1;
     }
 
-    // ── 加载脚本 ────────────────────────────────────
+    // ── 校验模式 ────────────────────────────
+    if let Some(target) = validate_target {
+        run_validate_mode(&target);
+        return;
+    }
+
+    // ── 加载脚本 ────────────────────────────
     let scripts = load_scripts(&scripts_dir);
     let num_scripts = scripts.len();
     if scripts.is_empty() {
@@ -360,16 +371,24 @@ fn main() {
 }
 
 /// 加载目录下所有 .rhai 文件 (按文件名排序)
-fn load_scripts(dir: &str) -> Vec<String> {
+///
+/// 三层校验: compile_and_validate → dry_run_validate → 通过
+fn load_scripts(dir: &str) -> Vec<(String, String)> {
     let path = Path::new(dir);
     if !path.exists() || !path.is_dir() {
         return vec![];
     }
+    
+    let invalid_dir = path.join("invalid");
+    if !invalid_dir.exists() {
+        let _ = fs::create_dir_all(&invalid_dir);
+    }
+
     let mut entries: Vec<_> = Vec::new();
     if let Ok(dir) = fs::read_dir(path) {
         for entry in dir.flatten() {
             let p = entry.path();
-            if p.extension().and_then(|e| e.to_str()) == Some("rhai") {
+            if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("rhai") {
                 entries.push(p);
             }
         }
@@ -377,13 +396,103 @@ fn load_scripts(dir: &str) -> Vec<String> {
     entries.sort();
 
     let mut scripts = Vec::new();
+    let engine = rsss::scripting::engine_builder::build_engine();
+
     for p in &entries {
         if let Ok(content) = fs::read_to_string(p) {
-            eprintln!("  Loaded: {}", p.display());
-            scripts.push(content);
+            match validate_script(&engine, &content) {
+                Ok(_) => {
+                    let name = p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    eprintln!("  Loaded: {}", p.display());
+                    scripts.push((content, name));
+                }
+                Err(e) => {
+                    eprintln!("SKIP: {}", p.display());
+                    eprintln!("   Reason: {}", e);
+                    if let Some(filename) = p.file_name() {
+                        let new_path = invalid_dir.join(filename);
+                        if let Err(mv_e) = fs::rename(p, &new_path) {
+                            eprintln!("   Could not move file: {}", mv_e);
+                        } else {
+                            eprintln!("   Moved to: {}", new_path.display());
+                        }
+                    }
+                }
+            }
         }
     }
     scripts
+}
+
+/// 三层校验: compile + on_tick检查 + dry-run
+fn validate_script(engine: &rhai::Engine, source: &str) -> Result<rhai::AST, String> {
+    let ast = rsss::scripting::sandbox::compile_and_validate(engine, source)?;
+    rsss::scripting::sandbox::dry_run_validate(engine, &ast)?;
+    Ok(ast)
+}
+
+/// --validate 模式: 校验单个文件或目录下所有 .rhai 文件
+///
+/// 输出格式 (stdout, 供 Python 解析):
+///   OK: filename.rhai
+///   FAIL: filename.rhai
+///   ERROR: 具体错误信息
+fn run_validate_mode(target: &str) {
+    let target_path = Path::new(target);
+    let engine = rsss::scripting::engine_builder::build_engine();
+
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+
+    if target_path.is_file() {
+        files.push(target_path.to_path_buf());
+    } else if target_path.is_dir() {
+        if let Ok(dir) = fs::read_dir(target_path) {
+            for entry in dir.flatten() {
+                let p = entry.path();
+                if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("rhai") {
+                    files.push(p);
+                }
+            }
+        }
+        files.sort();
+    } else {
+        eprintln!("FAIL: {}", target);
+        println!("ERROR: Path does not exist");
+        std::process::exit(1);
+    }
+
+    let mut ok_count = 0;
+    let mut fail_count = 0;
+
+    for p in &files {
+        let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+        match fs::read_to_string(p) {
+            Ok(content) => match validate_script(&engine, &content) {
+                Ok(_) => {
+                    println!("OK: {}", filename);
+                    ok_count += 1;
+                }
+                Err(e) => {
+                    println!("FAIL: {}", filename);
+                    println!("ERROR: {}", e);
+                    fail_count += 1;
+                }
+            },
+            Err(e) => {
+                println!("FAIL: {}", filename);
+                println!("ERROR: Cannot read file: {}", e);
+                fail_count += 1;
+            }
+        }
+    }
+
+    eprintln!("Validation complete: {} OK, {} FAIL", ok_count, fail_count);
+    if fail_count > 0 {
+        std::process::exit(1);
+    }
 }
 
 fn format_price(micros: i64) -> String {
@@ -422,5 +531,6 @@ fn print_usage() {
     println!("  --output DIR   Output directory (default: output)");
     println!("  --no-tui       Disable TUI, use text mode");
     println!("  --no-record    Disable CSV recording");
+    println!("  --validate F   Validate a .rhai file or directory (OK/FAIL output)");
     println!("  -h, --help     Show this help");
 }

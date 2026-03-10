@@ -56,7 +56,9 @@ impl IndicatorEngine {
 
     /// 推入新的 Tick 数据
     pub fn push(&mut self, price: i64, volume: i64) {
-        let prev = self.last_price;
+        // 用 prices 队列末尾作为前值（上一次 push 的价格），
+        // 而非 self.last_price（会被 Trade 事件中途更新导致 change=0）
+        let prev = self.prices.back().copied().unwrap_or(self.last_price);
 
         // 更新 MA 累加器
         self.sum_5 += price;

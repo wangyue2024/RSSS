@@ -32,4 +32,4 @@ pub use api::{
 };
 pub use engine_builder::build_engine;
 pub use rng::AgentRng;
-pub use sandbox::compile_and_validate;
+pub use sandbox::{compile_and_validate, dry_run_validate};

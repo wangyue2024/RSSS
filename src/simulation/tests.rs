@@ -14,7 +14,7 @@ fn test_world_builds() {
         warmup_ticks: 0,
         ..Default::default()
     };
-    let scripts = vec!["fn on_tick() {}".to_string()];
+    let scripts = vec![("fn on_tick() {}".to_string(), "test".to_string())];
     let world = World::new(config, scripts);
     assert!(world.is_ok());
 }
@@ -27,7 +27,7 @@ fn test_world_runs_empty_ticks() {
         warmup_ticks: 0,
         ..Default::default()
     };
-    let scripts = vec!["fn on_tick() {}".to_string()];
+    let scripts = vec![("fn on_tick() {}".to_string(), "test".to_string())];
     let mut world = World::new(config, scripts).unwrap();
     world.run(); // 不 panic 即可
     assert_eq!(world.tick, 19); // last tick = total - 1
@@ -50,22 +50,22 @@ fn test_agent_places_order() {
 
     // Agent 0: 买入  Agent 1: 卖出
     let scripts = vec![
-        r#"
+        (r#"
         fn on_tick() {
             if market.tick == 0 {
                 orders.submit_limit_buy(100_000_000, 10);
             }
         }
         "#
-        .to_string(),
-        r#"
+        .to_string(), "buyer".to_string()),
+        (r#"
         fn on_tick() {
             if market.tick == 0 {
                 orders.submit_limit_sell(99_000_000, 10);
             }
         }
         "#
-        .to_string(),
+        .to_string(), "seller".to_string()),
     ];
 
     let mut world = World::new(config, scripts).unwrap();
@@ -113,13 +113,13 @@ fn test_invalid_order_rejected() {
         ..Default::default()
     };
 
-    let scripts = vec![r#"
+    let scripts = vec![(r#"
         fn on_tick() {
             // 试图卖出 0 持股 → InsufficientStock
             orders.submit_limit_sell(100_000_000, 10);
         }
         "#
-    .to_string()];
+    .to_string(), "test".to_string())];
 
     let mut world = World::new(config, scripts).unwrap();
     world.run_tick();
@@ -144,7 +144,7 @@ fn test_deterministic_runs() {
             global_seed: 12345,
             ..Default::default()
         };
-        let scripts = vec![r#"
+        let scripts = vec![(r#"
             let counter = 0;
             fn on_tick() {
                 counter += 1;
@@ -159,7 +159,7 @@ fn test_deterministic_runs() {
                 }
             }
             "#
-        .to_string()];
+        .to_string(), "test".to_string())];
         World::new(config, scripts).unwrap()
     };
 
@@ -195,18 +195,18 @@ fn test_warmup_no_trades() {
     };
 
     let scripts = vec![
-        r#"
+        (r#"
         fn on_tick() {
             orders.submit_limit_buy(100_000_000, 10);
         }
         "#
-        .to_string(),
-        r#"
+        .to_string(), "buyer".to_string()),
+        (r#"
         fn on_tick() {
             orders.submit_limit_sell(99_000_000, 5);
         }
         "#
-        .to_string(),
+        .to_string(), "seller".to_string()),
     ];
 
     let mut world = World::new(config, scripts).unwrap();
