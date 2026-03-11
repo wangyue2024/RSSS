@@ -129,14 +129,17 @@ let len = history_len(market);
 /// 32 bytes, Copy = memcpy, 无堆分配
 #[derive(Clone, Copy)]
 pub struct AccountView {
-    pub cash: i64,
-    pub stock: i64,
+    pub cash: i64,             // 仅为“可用”现金 (不含冻结)
+    pub stock: i64,            // 仅为“可用”持仓 (不含冻结)
     pub total_equity: i64,
     pub avg_cost: i64,
     pub unrealized_pnl: i64,
     pub realized_pnl: i64,
 }
 ```
+
+> **设计抉择 (Sandbox Purity)**:
+> `AccountView` 故意隐藏了 `locked_cash` 和 `locked_stock`。这是因为对于策略脚本而言，下单校验只看“可用”资金/股数。隐藏冻结资产能让脚本逻辑保持纯粹，无需自行分辨可用额度与冻结额度。
 
 ### 4.3 AgentOrderBook — 订单跟踪 (Arc)
 

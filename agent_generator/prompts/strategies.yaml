@@ -58,10 +58,26 @@ strategies:
 
 # Group 5: Noise & Exogenous Traders
   - name: "drunkards_walk"
-    desc: "A purely random noise trader. Every tick, it uses `rng.next_u32() % 100`. If < 5, it buys randomly. If > 95, it sells randomly. The quantity and price offset are also completely random. It provides essential systemic entropy."
+    desc: "A high-frequency random noise trader providing essential market entropy. Every tick, use `rng.rand_int(0, 99)`. If < 20, submit a limit buy near the current price (within 1% below). If > 80, submit a limit sell near the current price (within 1% above). The quantity should be randomized between 1 and 50 shares using `rng.rand_int(1, 50)`. This agent trades frequently and provides baseline liquidity."
 
   - name: "fat_tail_fat_finger"
-    desc: "A noise trader that mostly does nothing. However, there is a 0.01% chance every tick that it experiences a 'fat finger' error, submitting a market order that is 100x larger than normal, causing an instant flash crash or spike."
+    desc: "A noise trader that mostly places small random limit orders (1-10 shares near the current price, ~30% chance per tick). However, there is a 1% chance every tick (`rng.rand_int(0, 99) == 0`) that it submits a market order for 50-200 shares in a random direction, simulating a 'fat finger' event."
 
   - name: "retail_stop_limit"
     desc: "A typical retail trader. It enters completely randomly once. Then, it places a strict take-profit limit order 5% above its cost, and a strict stop-loss market order 2% below its cost. It just waits for one of them to hit."
+
+# Group 6: Counter-Trend & Value Anchoring (CRITICAL for market balance)
+  - name: "value_anchor_buyer"
+    desc: "A value investor who believes the stock is worth 100 yuan (100_000_000 micros). When the price drops below this fair value, it progressively buys more: if price < fair_value * 95 / 100, buy small. If price < fair_value * 90 / 100, buy aggressively. It NEVER sells below fair value. It provides strong downside support. Use `rng.rand_int` to randomize the fair value slightly (95_000_000 to 105_000_000)."
+
+  - name: "value_anchor_seller"
+    desc: "A value investor who believes the stock is worth 100 yuan. When the price rises above fair value, it progressively sells: if price > fair_value * 105 / 100, sell small. If price > fair_value * 110 / 100, sell aggressively. It NEVER buys above fair value. It provides strong upside resistance. Use `rng.rand_int` to randomize the fair value slightly."
+
+  - name: "range_trader"
+    desc: "A range-bound trader that tracks the 20-tick high and low (`market.high_20` and `market.low_20`). It places a limit buy near the low_20 and a limit sell near the high_20. It profits from mean reversion within the range. If the range narrows (low spread), it increases position size. Cancels and re-places orders every tick."
+
+  - name: "periodic_rebalancer"
+    desc: "An index fund-like agent that maintains a target allocation of 50% cash / 50% stock (by value). Every 10 ticks, it calculates its current allocation. If stock value > 55% of equity, it sells some stock. If stock value < 45%, it buys some stock. Uses limit orders near the current price. This creates natural counter-trend flow."
+
+  - name: "contrarian_accumulator"
+    desc: "A contrarian long-term accumulator. It watches `market.rsi_14`. When RSI drops below 3000 (oversold), it aggressively buys using limit orders below the current price. When RSI rises above 7000 (overbought), it sells. It trades infrequently but in larger sizes (20-100 shares). It is the opposite of momentum traders."

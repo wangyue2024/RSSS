@@ -76,8 +76,10 @@ src/simulation/
 ```
 AgentState
 ├── id: u32                      全局唯一标识
-├── cash: i64                    当前现金 (微元)
-├── stock: i64                   当前持股 (股)
+├── cash: i64                    当前可用现金 (微元)
+├── stock: i64                   当前可用持股 (股)
+├── locked_cash: i64             挂单冻结现金 (微元)
+├── locked_stock: i64            挂单冻结持股 (股)
 ├── total_cost: i64              累计买入成本 (微元) → 均价 = total_cost / stock
 ├── realized_pnl: i64            已实现盈亏 (微元)
 ├── ast: Arc<AST>                编译后的 Rhai 脚本 (多 Agent 可共享)
@@ -212,23 +214,31 @@ for (agent_id, action) in all_actions:
 | `cash < price × amount` | 限价买   | `InsufficientCash`  |
 | `cash ≤ 0`              | 市价买   | `InsufficientCash`  |
 
+**冻结机制**：
+- 限价买：通过校验后，扣减 `cash` 并增加等额 `locked_cash`。
+- 限价卖：通过校验后，扣减 `stock` 并增加等额 `locked_stock`。
+- 市价单：不冻结，直接在 Execution 阶段即时结算。
+
 - 限价买使用 `i128` 计算 `price × amount` 防溢出
 - 市价买仅检查 `cash > 0` (无法预知成交价)
 - 被拒订单记入 `AgentOrderBook.history`，`status = 2`
 
-### 5.2 Trade 结算
+### 5.2 Trade 结算与资产解冻
 
 `settle_trade()` 处理一笔撮合成交：
 
-```
-                  Taker = Bid (买入)          Taker = Ask (卖出)
-Taker:   cash -= cost + fee, stock += vol   cash += cost - fee, stock -= vol
-Maker:   cash += cost - fee, stock -= vol   cash -= cost + fee, stock += vol
-```
+对于 **Maker (挂单方)**，其资产在挂单时已被冻结，成交时需解冻并清算：
+- 卖单成交：`locked_stock -= vol`, `cash += cost - fee`
+- 买单成交：`locked_cash -= 原挂单价 × vol`, `stock += vol`, `cash += (原挂单价 - 实际成交价) × vol - fee` (退回差价)
+
+对于 **Taker (主动吃单方)**，如果是市价单或 IOC，直接清算可用资金：
+- 卖入：`stock -= vol`, `cash += cost - fee`
+- 买入：`cash -= cost + fee`, `stock += vol`
 
 - **双边手续费**：Maker 和 Taker 各付 `fee = cost × fee_rate_bps / 10000`
 - **已实现盈亏**：卖方计算 `realized_pnl += (trade_price - avg_cost) × vol`
 - **成本跟踪**：卖出后 `total_cost -= avg_cost × vol`；买入后 `total_cost += cost`
+- **撤单解冻**：当订单被取消或拒绝时，`locked_cash` 或 `locked_stock` 会悉数退回可用资产。
 - **溢出安全**：`calculate_cost()` 内部提升 `i128` 做乘法
 
 ### 5.3 AgentOrderBook 更新

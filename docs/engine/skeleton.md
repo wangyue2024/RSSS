@@ -1,5 +1,10 @@
 # RSSS 引擎模块 (Engine) 实操步骤与代码框架
 
+> [!NOTE]
+> **文件定位说明**：
+> 本文件为一个**开发教程与 TDD 实现脚手架 (TDD Implementation Skeleton)**。它记录了引擎从 0 到 1 构建时的步骤、桩代码 (`unimplemented!()`) 及排雷指南。
+> 对后续实际开发和引擎最终使用机制的学习，请参考核心参考文档 [`engine.md`](engine.md)。
+
 本指南旨在将 `docs/engine_spec.md` 中的理论设计转化为实际的 Rust 代码工程。我们将采用 **TDD (测试驱动开发)** 的思路，先搭骨架，再填肌肉。
 
 ## 1. 目录结构规划 (Directory Structure)

@@ -54,7 +54,7 @@ SEM = asyncio.Semaphore(MAX_CONCURRENT)
 MAX_RETRIES = 5
 
 # 变体数
-VARIANTS_PER_STRATEGY = 50  # 20 strategies * 50 = 1000 agents
+VARIANTS_PER_STRATEGY = 40  # 25 strategies * 40 = 1000 (incremental: skips existing)
 
 # ================= Rust Validation =================
 def rust_validate(filepath: str) -> tuple[bool, str]:

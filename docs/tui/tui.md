@@ -84,12 +84,11 @@ pub struct UiState {
     pub tick: i64,
     pub total_ticks: i64,
     pub elapsed_secs: f64,
+    pub done: bool,                        // 仿真是否完成
+
+    // Market State
     pub price: i64,                        // 当前价 (微元)
     pub volume: i64,                       // 本 Tick 成交量
-    pub total_trades: u64,                 // 累计成交笔数
-    pub total_orders: u64,                 // 累计订单数
-    pub total_cancels: u64,                // 累计撤单数
-    pub sim_rejects: u64,                  // 仿真层拒绝数
     pub bid_prices: [i64; 5],              // L2 买盘 5 档价格
     pub bid_volumes: [i64; 5],
     pub ask_prices: [i64; 5],              // L2 卖盘 5 档价格
@@ -97,11 +96,23 @@ pub struct UiState {
     pub ma_5: i64,
     pub ma_20: i64,
     pub rsi_14: i64,
+
+    // Engine Stats
+    pub total_orders: u64,                 // 累计订单数
+    pub total_trades: u64,                 // 累计成交笔数
+    pub total_cancels: u64,                // 累计撤单数
+    pub sim_rejects: u64,                  // 仿真层拒绝数
+
+    // Chart Data
     pub price_history: VecDeque<i64>,      // 最近 200 Tick 价格
-    pub agents: Vec<AgentUiRow>,           // 按 equity 排序
+
+    // Recent Trades
     pub recent_trades: VecDeque<TradeUiRow>, // 最近 20 笔
-    pub done: bool,                        // 仿真是否完成
-    pub num_scripts: usize,                // 策略脚本数 (用于显示类型名)
+
+    // Top Agents
+    pub agents: Vec<AgentUiRow>,           // 按 equity 排序
+    pub num_scripts: usize,                // 策略脚本数
+    pub script_names: Vec<String>,         // 策略名称列表
 }
 ```
 
@@ -109,8 +120,14 @@ pub struct UiState {
 
 ```rust
 pub struct AgentUiRow {
-    pub id: u32, pub strategy_idx: usize,
-    pub cash: i64, pub stock: i64, pub equity: i64, pub realized_pnl: i64,
+    pub id: u32,
+    pub strategy_idx: usize,
+    pub cash: i64,
+    pub stock: i64,
+    pub locked_cash: i64,                  // 挂单冻结资金
+    pub locked_stock: i64,                 // 挂单冻结股票
+    pub equity: i64,
+    pub realized_pnl: i64,
 }
 pub struct TradeUiRow {
     pub tick: i64, pub maker_id: u32, pub taker_id: u32,

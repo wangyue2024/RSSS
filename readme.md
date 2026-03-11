@@ -1,277 +1,87 @@
-# Rust 高频微观市场仿真系统 (RSSS) - 架构设计规范 v2.0
+# RSSS — Rust Stock Simulation System
 
-## 1. 项目愿景与面试定位 (Vision & Pitch)
+RSSS 是一个基于纯 Rust 构建的极高性能、微观结构驱动的**计算金融框架**。基于混合运行时（Rust + Rhai 脚本）架构，实现在单机节点下，对上千个 AI（如 LLM 生成的策略代码）实施毫秒级、免锁（Lock-Free）、极小延迟（Zero-Copy）的高频撮合量化回测。
 
-### 1.1 项目定义
+## 🚀 核心架构亮点
 
-本项目是一个基于 **Rust** 的高性能、事件驱动型  **计算金融仿真系统 (Computational Finance Simulation)** 。
-核心目标是在单机环境下，通过 **Hybrid Runtime (混合运行时)** 架构，模拟 1000+ 个 AI Agent 在微观市场结构下的连续博弈与涌现现象。
+- **混合运行时 (Hybrid Runtime)**：撮合、清算、多线程调度完全由 Host 端 (Rust) 处理；轻量级的交易逻辑策略由 Guest 端 (Rhai) 在严格的沙箱隔离下动态解释执行。
+- **确定性与随机乱序模拟**：采用 Fisher-Yates 同步 Shuffle 技术。Agent 的下单请求到达主机后会被随机“打乱”后进入盘口，以数学概率模拟真实世界由于物理网络拓扑导致的“排队滑点(Slippage)”。配合Seedable固定种子实现比特级回测结果复现 (Bit-wise Reproducible)。
+- **金融级定点数 (Zero Float)**：拒绝任何 `f64`。整个市场内数据，包括计算因子全都按 $10^6$ (Micros) 表示的 `i64` 流转。
+- **影子撤单机制 (Shadow Cancellation)**：系统 OrderBook 底层为 `BTreeMap`+`VecDeque` 混合结构。辅加 `HashMap` 倒排索引，将从百万级订单阵列中执行“查询并撤单”的过程时间复杂度极致优化至 **O(1)**。
+- **并发状态免拷贝零开销**：行情 `MarketState` 作为全局单例包裹在 `Arc` 下。每一次 Tick 更新后分发给上千个 Agent，无堆拷贝负担。
 
-### 1.2 核心技术亮点 (Interview Highlights)
+## 📂 源码目录导读
 
-* **零拷贝架构 (Zero-Copy Architecture)** : 利用 `Arc<MarketState>` 与 Rust 的所有权机制，在 1000 个并发 Agent 间实现毫秒级快照分发，极大降低缓存未命中 (Cache Miss)。
-* **确定性并发 (Deterministic Concurrency)** : 摒弃简单的多线程随机，采用 **Seedable RNG** (基于种子的随机数生成器)，确保在并行计算 (Rayon) 下，只要种子一致，回测结果 **比特级可复现 (Bit-wise Reproducible)** 。
-* **定点数引擎 (Fixed-Point Engine)** : 摒弃 `f64`，底层核心全部采用 `i64` 微元 (Micros) 存储价格与金额，彻底消除 IEEE 754 浮点误差。全系统入口采用纯整数构造 `Price::from_parts(integer, decimal)` 或字符串解析 `Price::from_str("100.50")`，杜绝浮点中转损失。
-* **影子撤单 (Shadow Cancellation)** : 撮合引擎采用 `BTreeMap<Price, LevelQueue>` 有序盘口 + `HashMap<u64, OrderMeta>` 倒排索引结构。撤单时仅移除索引条目并扣减档位总量，不操作 `VecDeque` 队列。撮合时自动跳过"幽灵订单"，将撤单复杂度优化至 **O(1)** ，并定期通过 GC 接口回收内存。
+所有核心组件高度解耦且边界清晰，汇聚在 `src` 目录下：
 
-## 2. 系统架构 (System Architecture)
+| 模块 / 文件 | 职能定义 |
+| :--- | :--- |
+| **`main.rs` / `lib.rs`** | CLI 应用入口。负责解析参数、调度多线程（仿真主线程、UI渲染线程、后台异步落地IO线程）。 |
+| **`domain/`** | 顶层只依赖标准库的最原子数据抽象层。定义紧密内存对齐的 32 Byte `Order` 实休，核心 `Price` 和 `Vol` NewType 封装。及其防溢出金融运算底层接口。 |
+| **`engine/`** | **核心撮合黑盒**。仅收单和抛事件。以价格优先、时间优先为绝对准则。不碰资金处理，内部执行复杂而高效的“队列维护”及“防对敲”剔除。 |
+| **`scripting/`** | Rust 算力底座与动态脚本语言的数据通讯协议桥接。定义注入沙盒中的 API `MarketState` 和 `AccountView`。暴露原生 C 性能级别的数组测速模块 `math.rs` 供脚本调用。 |
+| **`simulation/`** | **推演环境层（上帝视角）**。`world.rs` 负责宏大的主流程控制(Tick生命周期)。通过 Rayon 并行唤醒 Agents 计算，采集结果完成洗牌，并通过 `settlement.rs` （结算模块）对事件执行严谨的资金与持卡解冻/扣压核算。|
+| **`record/`** | IO 黑匣子。通过异步信道隔离主架构，使用 `BufWriter` 将海量成交明细全量导出，不阻塞运算节律。 |
+| **`tui/`** | 命令行炫酷控制台界面。依靠 `Crossterm` / `ratatui`。独立频率渲染 L2 行情、K线快照及百名高频交易员资产 PnL 前列榜单。 |
 
-### 2.1 拓扑结构
+## 🕹️ 编译与运行指南
 
-采用 **Host-Guest (宿主-寄生)** 模式：
+### 环境依赖
+- 安装最新稳定的 Rust 工具链 (edition 2021) 至少 Rust 1.70+
 
-* **Host (Rust)** : 负责重计算（指标、撮合）、并发调度、内存管理。
-* **Guest (Rhai)** : 负责轻逻辑（策略分支、状态流转）。
-* **Glue (Math Lib)** : Rust 暴露 SIMD 加速的向量化算子给 Rhai，解决脚本计算慢的问题。
+### 基本运行模式
 
-### 2.2 核心生命周期 (The Loop)
+编译并在 release 下运行（高频仿真系统**极度推荐使用 `--release` 参数**获取最大性能）：
 
-系统在一个长回合 (Session) 中连续运行，无"日/夜"分割。每一帧 (Tick) 严格遵循以下原子阶段：
-
-1. **Pre-Calculation (重计算阶段)**
-   * Rust 更新全局历史窗口。
-   * 计算高耗时指标 (VWAP, Slope, Imbalance)。
-   * **关键** : 将所有数据封装为只读的 `Arc<MarketSharedState>`。
-2. **Decision (决策阶段 - 并行)**
-   * 利用 `rayon` 线程池，1000 个 Agent 并行执行 `decide()`。
-   * **Context** : 传入 `Arc<MarketSharedState>` (公) 和 `&mut AgentAccount` (私)。
-   * **Output** : 生成 `AgentDecision` (包含订单请求)。
-   * **约束** : `decide()` 必须是纯函数——仅依赖传入的 `Arc<State>` 和 `&mut Account`，严禁访问任何全局可变状态。Order ID 在 Shuffle 阶段由主线程统一分配。
-3. **Shuffle (熵增阶段)**
-   * **关键** : 使用 Fisher-Yates 算法对所有决策进行随机打乱。
-   * **目的** : 模拟物理网络延迟的不确定性，制造滑点 (Slippage) 和抢单失败的风险。
-4. **Execution (执行阶段 - 串行)**
-   * 撮合引擎处理订单 (Match/Cancel)。
-   * **影子撤单** : 撮合时自动跳过已从 `order_index` 移除的幽灵订单。
-   * **结算** : 扣除手续费，原子更新账户资金。
-   * **GC (可选)** : 每 N 个 Tick 调用 `gc_phantom_orders()` 回收幽灵订单内存。
-
-## 3. 核心领域模型 (Domain Models)
-
-### 3.1 定点数与精度 (Fixed-Point Math)
-
-为了金融计算的严谨性，所有价格与金额在 Rust 内部均使用 `i64` 微元 (Micros)。
-
-**核心原则：全链路零浮点 (Zero Floating-Point End-to-End)**
-
-```
-// 精度缩放因子: 10^6 (支持到小数点后 6 位)
-pub const SCALING_FACTOR: i64 = 1_000_000;
-
-// ✅ 推荐：纯整数构造 (零精度损失)
-// 100.50 元 -> Price::from_parts(100, 500_000) -> 内部存储 100_500_000
-pub fn from_parts(integer: i64, decimal: u32) -> Price {
-    Price(integer * SCALING_FACTOR + decimal as i64)
-}
-
-// ✅ 推荐：字符串解析 (零精度损失)
-// "100.50" -> Price::from_str("100.50") -> 内部存储 100_500_000
-pub fn from_str(s: &str) -> Result<Price, ParseError> { ... }
-
-// ⚠️ 仅用于初始化/配置加载，核心路径禁用
-// 存在 IEEE 754 精度风险：to_micros_lossy(0.1) 可能 ≠ 100_000
-pub fn to_micros_lossy(value: f64) -> i64 {
-    (value * SCALING_FACTOR as f64).round() as i64
-}
-
-// 展示用：将内部微元转为人类可读的字符串
-pub fn to_display_string(micros: i64) -> String {
-    format!("{}.{:06}", micros / SCALING_FACTOR, (micros % SCALING_FACTOR).abs())
-}
+```bash
+cargo run --release -- --agents 1000 --ticks 10000 --cash 10000 --stock 100
 ```
 
-### 3.2 撮合引擎 (Matching Engine)
+系统会自动拉取项目根目录下 `agent_generator/output/` 内所有扩展名为 `.rhai` 的脚本。
 
-采用 **BTreeMap 有序盘口 + VecDeque 队列 + HashMap 倒排索引 + 影子撤单** 结构。
+### 核心可选参数 (`--help` 查看全部)
 
-```
-use std::collections::{BTreeMap, HashMap, VecDeque};
+| 参数项 | 说明 | 默认值 |
+| :--- | :--- | :--- |
+| `[SCRIPT PATH]` | 不加 `--` 的第一参数视作目标脚本存放路径。 | `agent_generator\output` |
+| `--agents N` | 并行跑动多少个实体 Agent (自动复数分配目标目录下的脚本) | 1000 |
+| `--ticks N` | 仿真持续的总体帧数 | 10000 |
+| `--seed N` | 计算一致性的绝对源头基础种子 | 42 |
+| `--warmup N` | 屏蔽交易指令的“开盘前算子准备期”时钟长 | 100 |
+| `--fee N` | 双边撮合税，基点万分（bps）。如 `3` 为万三 | 3 |
+| `--no-tui` | 启用脱机极速运算后台模式 (极大提高单机跑测 TPS) | `false` |
+| `--validate F` | 测试单点脚本生命周期或批量文件夹沙盒安全试跑 | 无 |
 
-pub struct OrderBook {
-    // 买盘：价格降序 (遍历时 .rev())
-    pub bids: BTreeMap<Price, LevelQueue>,
-    // 卖盘：价格升序
-    pub asks: BTreeMap<Price, LevelQueue>,
-    // 订单倒排索引：O(1) 定位撤单
-    pub order_index: HashMap<u64, OrderMeta>,
-}
+### TUI 界面
+启动后将看到终端绘图 (TUI开启时)：
+- 左侧涵盖当前的 L2 Snapshot。
+- 右侧为 Agent 的净资产波动排名。
+- 输入 `q` 退出进程。 
 
-pub struct LevelQueue {
-    pub total_volume: Vol,          // 缓存档位总量，L2 快照 O(1)
-    pub orders: VecDeque<Order>,    // FIFO 队列，保证时间优先
-}
+## 📝 Rhai 策略开发说明
 
-pub struct OrderMeta {
-    pub price: Price,
-    pub side: Side,
-}
+脚本层拥有对独立作用域（Scope）内存修改的天然继承性能力。全局无需建立外部存储，直接利用顶层变量编写初始化常态变量：
 
-impl OrderBook {
-    /// 核心入口：接收订单，返回领域事件列表
-    pub fn process_order(&mut self, order: Order) -> Vec<MatchEvent> { ... }
+```rhai
+// 这部分（外层）仅在系统刚启动向 Agent 植入环境时运行一次
+let start_pos = account.stock;
+let risk_tolerance = 20_000;  // 2% 定义为止损微元单位
 
-    /// 影子撤单：仅移除索引、扣减总量，不操作队列
-    pub fn cancel_order(&mut self, order_id: u64) -> MatchEvent { ... }
+// 此函数是仿真体系的回调接入核心。引擎每次 Tick 唤醒必须。
+fn on_tick() {
+    // 1. 安全合规：度过预热禁令期
+    if !market.trading_enabled { return; }
 
-    /// L2 快照：基于 BTreeMap 有序遍历，O(K) 复杂度
-    pub fn get_l2_snapshot(&self, depth: usize) -> (Vec<(Price, Vol)>, Vec<(Price, Vol)>) { ... }
-
-    /// GC 回收：清理幽灵订单，建议每 N Tick 调用
-    pub fn gc_phantom_orders(&mut self) -> GcReport { ... }
+    // 2. 态势计算 (纯整数计算)
+    let spread = market.vwap - market.price;
+    let threshold = market.price * market.fee_rate_bps * 10 / 100_000;
+    
+    // 3. 多分支开单挂起决策
+    if spread > threshold {
+        // 利用 Rust 注入的高速邮箱对象落单 
+        // buy: (价格 micros, 容量) -> 返回该次生成的订单临时ID (并非绝对最终ID)
+        let buy_id = orders.submit_limit_buy(market.price, 25);
+    }
 }
 ```
-
-**撮合时幽灵订单处理** : 从档位 `LevelQueue.orders.pop_front()` 取出 Maker 后，先校验其 `id` 是否仍在 `order_index` 中。若不在，说明已被影子撤单，直接丢弃并继续取下一个。
-
-### 3.3 经济模型配置 (Configuration)
-
-* **Transaction Fee** : 全局手续费率，以基点 (Basis Points) 整数表示。`fee_rate_bps: i64 = 3` 代表万分之三。计算时：`fee = price * volume * fee_rate_bps / 10_000`（在 i128 中间提升后计算）。
-* **Warm-up Period** : 预热期 (前 N Tick)，允许计算指标，禁止交易。
-* **Base Position** : 初始化时随机分配给 Agent 的底仓。
-
-## 4. 接口规范 (API Reference for Rhai)
-
-全链路整数化：Rust 暴露给 Rhai 的数据全部保持 `i64` 微元格式。脚本中直接使用整数比较与运算，无浮点精度风险。
-
-### 4.1 市场共享状态 (`market`)
-
-```
-struct MarketSharedState {
-    // [时空]
-    pub tick: u64,
-    pub total_ticks: u64,
-    pub trading_enabled: bool,   // 是否在交易期 (非预热期)
-    pub fee_rate_bps: i64,       // 手续费率 (基点, 如 3 = 万分之三)
-
-    // [行情 - i64 微元]
-    pub price: i64,              // 最新成交价 (micros)
-    pub volume: u64,             // 最新成交量
-  
-    // [微观结构]
-    pub buy_volume: u64,         // 主动买量
-    pub sell_volume: u64,        // 主动卖量
-  
-    // [盘口深度 - 全整数]
-    pub bids: Vec<(i64, u64)>,   // Top 5 [(Price micros, Vol)]
-    pub asks: Vec<(i64, u64)>,   // Top 5
-    pub order_imbalance: i64,    // 盘口压力 [-1_000_000, 1_000_000] (micros 缩放)
-
-    // [预计算指标 - i64 微元]
-    pub ma_5: i64,               // 5 周期移动平均 (micros)
-    pub ma_20: i64,
-    pub ma_60: i64,
-    pub high_20: i64,            // 20 周期最高价 (micros)
-    pub low_20: i64,
-    pub vwap: i64,               // 成交量加权均价 (micros)
-    pub std_dev: i64,            // 标准差 (micros)
-    pub atr_14: i64,             // ATR (micros)
-
-    // [原始数据 - RingBuffer]
-    pub history_prices: Vec<i64>,  // 历史价格 (micros)
-    pub history_volumes: Vec<u64>,
-}
-```
-
-### 4.2 账户私有状态 (`account`)
-
-```
-struct AgentAccount {
-    pub cash: i64,               // 现金 (micros)
-    pub stock: i64,              // 持仓 (可能包含初始底仓)
-    pub total_equity: i64,       // 总权益 (micros, Mark-to-Market)
-  
-    pub unrealized_pnl: i64,     // 浮动盈亏 (micros)
-    pub realized_pnl: i64,       // 已实现盈亏 (micros)
-    pub avg_cost: i64,           // 持仓成本 (micros)
-
-    pub last_order_status: String, // "Filled", "Partial", "Rejected", "None"
-    pub custom_memory: Map,        // 持久化存储
-}
-```
-
-### 4.3 数学工具库 (`math`)
-
-提供 Rust 原生实现的向量化算子，替代脚本循环。所有输入输出均为 `i64` 或 `Vec<i64>`。
-
-* `math.sum`, `math.mean`, `math.std_dev`, `math.slope` (线性回归)
-* `math.v_add`, `math.v_sub`, `math.dot` (点积)
-
-**注意** : `math.mean` 和 `math.std_dev` 等统计函数在 Rust 内部使用 `i128` 累加器避免溢出，最终结果截断回 `i64` micros。
-
-## 5. Agent 行为规范 (Agent Spec)
-
-这是指导 DeepSeek 生成策略的核心逻辑模板。
-
-### 5.1 惰性初始化 (Lazy Setup Pattern)
-
-Agent 必须在脚本开头检查自身是否初始化，以设定个性化参数。
-
-```
-// [Step 0] 惰性初始化
-if !account.custom_memory.contains("initialized") {
-    account.custom_memory.put("initialized", true);
-    // 个性化配置 (整数表达: 20_000 = 0.02 = 2% 止损, micros 缩放)
-    account.custom_memory.put("risk_tolerance", 20_000);
-    account.custom_memory.put("target_pos", 0);
-    return #{ action: Action.Hold, ... };
-}
-```
-
-### 5.2 预热期合规 (Compliance)
-
-```
-// [Step 1] 预热期检查
-if !market.trading_enabled {
-    // 此时可以计算长期指标，但绝不能下单
-    return #{ action: Action.Hold, ... };
-}
-```
-
-### 5.3 决策逻辑示例
-
-```
-// [Step 2] 策略计算 (全整数运算)
-// 使用 math 库进行计算
-let slope = math.slope(market.history_prices);
-
-// 考虑手续费的套利检查 (整数比较，无浮点风险)
-// potential_profit_micros = (vwap - price) * SCALING_FACTOR / price
-// 等价于在 micros 空间直接比较
-let spread = market.vwap - market.price;
-let threshold = market.price * market.fee_rate_bps * 15 / 10_000_0;
-if spread > threshold {
-    // ...
-}
-
-// [Step 3] 返回决策
-return #{
-    action: Action.Buy,
-    order_type: OrderType.Limit,
-    price: market.price,   // i64 micros
-    amount: 100
-};
-```
-
-## 6. 开发路线图 (Implementation Roadmap)
-
-### Phase 1: 核心骨架 (The Skeleton)
-
-1. **Project Setup** : 配置 `Cargo.toml` (rhai, rayon, serde, statrs)。
-2. **Domain** : 实现 `Price::from_parts` / `Price::from_str` 纯整数构造逻辑，`Vol` NewType，`Order` 32 字节缓存行对齐。
-3. **Engine** : 实现 `OrderBook`，包含 **BTreeMap 有序盘口** 、 **影子撤单** 和 **GC 回收** 逻辑。
-
-### Phase 2: 运行时桥接 (The Bridge)
-
-1. **Binding** : 将 `MarketState` 和 `AgentAccount` 注册到 Rhai。全部字段保持 `i64` 微元，Rhai 层 Getter 直接返回整数。
-2. **Math Lib** : 实现 `src/math.rs`，暴露统计函数（内部 `i128` 累加，输出 `i64`）。
-
-### Phase 3: 主循环与并发 (The Loop)
-
-1. **Simulation** : 实现 `run_session` 主循环。
-2. **Concurrency** : 使用 `rayon::par_iter` 并行执行 Agent 脚本。`decide()` 为纯函数，Order ID 在主线程统一分配。
-3. **Determinism** : 实现基于 Seed 的随机洗牌。
-
-### Phase 4: 策略生成与回测 (The Experiment)
-
-1. **Prompt Engineering** : 使用文档中的规范生成 10 类 Agent。
-2. **Visualization** : (可选) TUI 终端可视化。
+**注意：** 因为没有小数点，务必留意基准价格微差比的等式扩大和向下截断效应。

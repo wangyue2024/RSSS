@@ -53,7 +53,7 @@ pub struct RecordConfig {
 | :-------------- | :----------------- | :------------------------------------------------------- |
 | `MarketTick`    | 每 Tick 1 条       | tick, price, volume, bid/ask, MA, RSI, VWAP... (17 字段) |
 | `Trade`         | 每笔成交           | tick, maker_id, taker_id, price, amount, taker_side      |
-| `AgentSnapshot` | 每 Tick × 每 Agent | tick, agent_id, cash, stock, equity, pnl, pending        |
+| `AgentSnapshot` | 每 Tick × 每 Agent | tick, agent_id, cash, stock, locked_cash, locked_stock, equity, realized_pnl, unrealized_pnl, pending_orders |
 | `Done`          | 仿真结束           | 无数据，触发 flush + 退出                                |
 
 ---
@@ -89,8 +89,8 @@ tick,maker_id,taker_id,price,amount,taker_side
 每 Tick × 每 Agent 1 行：
 
 ```csv
-tick,agent_id,cash,stock,equity,realized_pnl,unrealized_pnl,pending_orders
-0,0,10000000000,100,20000000000,0,0,0
+tick,agent_id,cash,stock,locked_cash,locked_stock,equity,realized_pnl,unrealized_pnl,pending_orders
+0,0,10000000000,100,0,0,20000000000,0,0,0
 ```
 
 **估算数据量** (10,000 Ticks × 100 Agents):

@@ -95,9 +95,10 @@ fn main() {
         return;
     }
 
-    // ── 加载脚本 ────────────────────────────
+    // ── 加载脚本 ────────────────────────
     let scripts = load_scripts(&scripts_dir);
     let num_scripts = scripts.len();
+    let script_names: Vec<String> = scripts.iter().map(|(_, name)| name.clone()).collect();
     if scripts.is_empty() {
         eprintln!("Warning: No .rhai scripts found in '{}'", scripts_dir);
     }
@@ -162,7 +163,7 @@ fn main() {
     };
 
     // ── 创建 UiState ────────────────────────────────
-    let ui_state = Arc::new(Mutex::new(UiState::new(config.total_ticks, num_scripts)));
+    let ui_state = Arc::new(Mutex::new(UiState::new(config.total_ticks, num_scripts, script_names.clone())));
 
     // ── Simulation Thread ───────────────────────────
     let ui_state_sim = Arc::clone(&ui_state);
@@ -352,7 +353,7 @@ fn main() {
             println!(
                 "{:>5}  {:>6}  {:>12}  {:>6}  {:>12}  {:>12}",
                 a.id,
-                strategy_name(a.strategy_idx, num_scripts),
+                script_type_label(a.strategy_idx, &script_names),
                 format_price(a.cash),
                 a.stock,
                 format_price(a.equity),
@@ -503,18 +504,19 @@ fn format_price(micros: i64) -> String {
     format!("{}{}.{:02}", sign, yuan, frac / 10_000)
 }
 
-fn strategy_name(idx: usize, num_scripts: usize) -> &'static str {
-    if num_scripts == 0 {
-        return "empty";
+fn script_type_label(strategy_idx: usize, script_names: &[String]) -> String {
+    if script_names.is_empty() {
+        return "?".to_string();
     }
-    match idx % num_scripts {
-        0 => "MM",
-        1 => "MOM",
-        2 => "MR",
-        3 => "NOISE",
-        4 => "RSI",
-        _ => "OTHER",
-    }
+    let idx = strategy_idx % script_names.len();
+    let name = &script_names[idx];
+    let base = if let Some(pos) = name.rfind("_v") {
+        &name[..pos]
+    } else {
+        name.as_str()
+    };
+    let abbr: String = base.split('_').filter_map(|w| w.chars().next()).collect();
+    if abbr.len() <= 8 { abbr } else { abbr[..8].to_string() }
 }
 
 fn print_usage() {

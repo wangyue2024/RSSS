@@ -67,26 +67,22 @@ impl World {
             compiled.push((Arc::new(ast), is_mm));
         }
 
-        // 创建 Agents
-        let mm_cash_multiplier: i64 = 5;
-        let mm_stock_multiplier: i64 = 5;
+        // 创建 Agents (所有 agent 相同初始资金)
         let mut agents = Vec::with_capacity(config.num_agents as usize);
         for id in 0..config.num_agents {
             let ast_idx = id as usize % compiled.len().max(1);
-            let (ast, is_mm) = if compiled.is_empty() {
-                (Arc::new(rhai_engine.compile("fn on_tick() {}").unwrap()), false)
+            let ast = if compiled.is_empty() {
+                Arc::new(rhai_engine.compile("fn on_tick() {}").unwrap())
             } else {
-                let (ref a, mm) = compiled[ast_idx];
-                (Arc::clone(a), mm)
+                let (ref a, _is_mm) = compiled[ast_idx];
+                Arc::clone(a)
             };
-            let cash = if is_mm { config.initial_cash * mm_cash_multiplier } else { config.initial_cash };
-            let stock = if is_mm { config.initial_stock * mm_stock_multiplier } else { config.initial_stock };
             agents.push(AgentState::new(
                 id,
                 ast,
                 config.global_seed,
-                cash,
-                stock,
+                config.initial_cash,
+                config.initial_stock,
             ));
         }
 

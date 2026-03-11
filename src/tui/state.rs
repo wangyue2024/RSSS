@@ -61,13 +61,15 @@ pub struct UiState {
     // Top Agents
     pub agents: Vec<AgentUiRow>,
     pub num_scripts: usize,
+    pub script_names: Vec<String>,
 }
 
 impl UiState {
-    pub fn new(total_ticks: i64, num_scripts: usize) -> Self {
+    pub fn new(total_ticks: i64, num_scripts: usize, script_names: Vec<String>) -> Self {
         Self {
             total_ticks,
             num_scripts,
+            script_names,
             price_history: VecDeque::with_capacity(200),
             recent_trades: VecDeque::with_capacity(20),
             rsi_14: 5000,

@@ -20,19 +20,22 @@ fn fmt_price(micros: i64) -> String {
     )
 }
 
-/// 策略名
-fn strategy_name(idx: usize, num_scripts: usize) -> &'static str {
-    if num_scripts == 0 {
-        return "empty";
+/// 从脚本名提取短策略标签 (e.g. "pure_market_maker_v3" → "pure_mm")
+fn strategy_label(state: &UiState, strategy_idx: usize) -> String {
+    if state.script_names.is_empty() {
+        return "?".to_string();
     }
-    match idx % num_scripts {
-        0 => "MM",
-        1 => "MOM",
-        2 => "MR",
-        3 => "NOISE",
-        4 => "RSI",
-        _ => "OTHER",
-    }
+    let idx = strategy_idx % state.script_names.len();
+    let name = &state.script_names[idx];
+    // 去掉 _vN 后缀，截取前 10 字符
+    let base = if let Some(pos) = name.rfind("_v") {
+        &name[..pos]
+    } else {
+        name.as_str()
+    };
+    // 缩写：取每个 _ 分隔词的首字母
+    let abbr: String = base.split('_').filter_map(|w| w.chars().next()).collect();
+    if abbr.len() <= 8 { abbr } else { abbr[..8].to_string() }
 }
 
 /// 渲染整个 UI
@@ -219,7 +222,7 @@ fn draw_agents(f: &mut Frame, area: Rect, state: &UiState) {
         };
         Row::new(vec![
             Cell::from(format!("{:>3}", a.id)),
-            Cell::from(strategy_name(a.strategy_idx, state.num_scripts)),
+            Cell::from(strategy_label(state, a.strategy_idx)),
             Cell::from(format!(
                 "{} ▼{}",
                 fmt_price(a.cash),
