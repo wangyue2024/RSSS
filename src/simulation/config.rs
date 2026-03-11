@@ -28,13 +28,13 @@ pub struct SimConfig {
 impl Default for SimConfig {
     fn default() -> Self {
         Self {
-            total_ticks: 10_000,
+            total_ticks: 100_000,
             warmup_ticks: 100,
             initial_price: 100_000_000, // 100.00 元
             global_seed: 42,
             num_agents: 1000,
-            initial_cash: 10_000_000_000, // 10,000 元
-            initial_stock: 100,
+            initial_cash: 100_000_000_000, // 100,000 元
+            initial_stock: 10,
             fee_rate_bps: 3,
             gc_interval: 500,
             gc_threshold: 10_000,

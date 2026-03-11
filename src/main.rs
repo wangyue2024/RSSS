@@ -25,6 +25,7 @@ fn main() {
     let mut no_record = false;
     let mut output_dir = String::from("output");
     let mut validate_target: Option<String> = None;
+    let mut num_agents_opt: Option<u32> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -35,7 +36,7 @@ fn main() {
             }
             "--agents" => {
                 i += 1;
-                config.num_agents = args[i].parse().expect("Invalid --agents value");
+                num_agents_opt = Some(args[i].parse().expect("Invalid --agents value"));
             }
             "--seed" => {
                 i += 1;
@@ -101,6 +102,12 @@ fn main() {
     let script_names: Vec<String> = scripts.iter().map(|(_, name)| name.clone()).collect();
     if scripts.is_empty() {
         eprintln!("Warning: No .rhai scripts found in '{}'", scripts_dir);
+    }
+
+    if let Some(n) = num_agents_opt {
+        config.num_agents = n;
+    } else if num_scripts > 0 {
+        config.num_agents = num_scripts as u32;
     }
 
     // 非 TUI 模式下打印配置
@@ -523,12 +530,12 @@ fn print_usage() {
     println!("Usage: rsss [scripts_dir] [options]");
     println!();
     println!("Options:");
-    println!("  --ticks N      Total simulation ticks (default: 10000)");
-    println!("  --agents N     Number of agents (default: 1000)");
+    println!("  --ticks N      Total simulation ticks (default: 100000)");
+    println!("  --agents N     Number of agents (default: auto-detected from scripts)");
     println!("  --seed N       Global random seed (default: 42)");
     println!("  --warmup N     Warmup ticks (default: 100)");
-    println!("  --cash N       Initial cash in yuan (default: 10000)");
-    println!("  --stock N      Initial stock per agent (default: 100)");
+    println!("  --cash N       Initial cash in yuan (default: 100000)");
+    println!("  --stock N      Initial stock per agent (default: 10)");
     println!("  --fee N        Fee rate in bps (default: 3)");
     println!("  --output DIR   Output directory (default: output)");
     println!("  --no-tui       Disable TUI, use text mode");
