@@ -30,7 +30,7 @@ impl Default for SimConfig {
         Self {
             total_ticks: 100_000,
             warmup_ticks: 100,
-            initial_price: 100_000_000, // 100.00 元
+            initial_price: 1000_000_000, // 100.00 元
             global_seed: 42,
             num_agents: 1000,
             initial_cash: 100_000_000_000, // 100,000 元

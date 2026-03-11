@@ -46,6 +46,11 @@ fn main() {
                 i += 1;
                 config.warmup_ticks = args[i].parse().expect("Invalid --warmup value");
             }
+            "--price" => {
+                i += 1;
+                let yuan: i64 = args[i].parse().expect("Invalid --price value");
+                config.initial_price = yuan * 1_000_000;
+            }
             "--cash" => {
                 i += 1;
                 let yuan: i64 = args[i].parse().expect("Invalid --cash value");
@@ -534,6 +539,7 @@ fn print_usage() {
     println!("  --agents N     Number of agents (default: auto-detected from scripts)");
     println!("  --seed N       Global random seed (default: 42)");
     println!("  --warmup N     Warmup ticks (default: 100)");
+    println!("  --price N      Initial price in yuan (default: 100)");
     println!("  --cash N       Initial cash in yuan (default: 100000)");
     println!("  --stock N      Initial stock per agent (default: 10)");
     println!("  --fee N        Fee rate in bps (default: 3)");
