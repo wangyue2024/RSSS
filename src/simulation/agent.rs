@@ -1,6 +1,10 @@
 //! Agent 运行时状态与生命周期管理
 
 use std::sync::Arc;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use rhai::{Scope, AST};
 
@@ -123,7 +127,7 @@ impl AgentState {
                 Ok(_) => {}
                 Err(e) => {
                     self.disabled = true;
-                    eprintln!("Agent {} DISABLED (init error): {}", self.id, e);
+                    log_agent_error(format!("Agent {} DISABLED (init error): {}", self.id, e));
                     return;
                 }
             }
@@ -139,10 +143,10 @@ impl AgentState {
                 self.error_count += 1;
                 if self.error_count >= MAX_CONSECUTIVE_ERRORS {
                     self.disabled = true;
-                    eprintln!(
+                    log_agent_error(format!(
                         "Agent {} DISABLED after {} consecutive errors: {}",
                         self.id, self.error_count, e
-                    );
+                    ));
                 }
             }
         }
@@ -166,5 +170,22 @@ impl AgentState {
                 m.actions
             })
             .unwrap_or_default()
+    }
+}
+
+static ERROR_LOG_FILE: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
+
+fn log_agent_error(msg: String) {
+    let mutex = ERROR_LOG_FILE.get_or_init(|| {
+        let _ = fs::create_dir_all("output");
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("output/agent_errors.log")
+            .expect("Failed to open agent_errors.log");
+        Mutex::new(file)
+    });
+    if let Ok(mut file) = mutex.lock() {
+        let _ = writeln!(file, "{}", msg);
     }
 }

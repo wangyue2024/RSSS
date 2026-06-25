@@ -16,6 +16,11 @@ use rsss::simulation::{SimConfig, World};
 use rsss::tui::{AgentUiRow, TradeUiRow, UiState};
 
 fn main() {
+    // 初始化 Rayon 全局线程池，设置每个工作线程的系统栈大小为 4MB
+    let _ = rayon::ThreadPoolBuilder::new()
+        .stack_size(4 * 1024 * 1024)
+        .build_global();
+
     let args: Vec<String> = env::args().collect();
 
     // ── 解析命令行参数 ──────────────────────────────
@@ -178,8 +183,11 @@ fn main() {
     let _warmup_ticks = config.warmup_ticks;
     let no_tui_flag = no_tui;
 
-    let sim_handle = std::thread::spawn(move || {
-        let t0 = Instant::now();
+    let sim_handle = std::thread::Builder::new()
+        .name("simulation".to_string())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let t0 = Instant::now();
 
         for tick in 0..total_ticks {
             world.tick = tick;
@@ -243,6 +251,11 @@ fn main() {
 
                 // L2 盘口
                 let (bids, asks) = world.order_book.get_l2_snapshot(5);
+                state.bid_prices = [0; 5];
+                state.bid_volumes = [0; 5];
+                state.ask_prices = [0; 5];
+                state.ask_volumes = [0; 5];
+
                 for (i, &(p, v)) in bids.iter().enumerate().take(5) {
                     state.bid_prices[i] = p.as_micros();
                     state.bid_volumes[i] = v.as_u64() as i64;
@@ -328,7 +341,7 @@ fn main() {
         let final_price = world.indicators.last_price();
         let elapsed = t0.elapsed();
         (stats, final_price, elapsed, world.sim_rejects)
-    });
+    }).unwrap();
 
     // ── Main Thread: TUI 或等待 ─────────────────────
     if no_tui {

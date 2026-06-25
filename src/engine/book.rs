@@ -204,6 +204,7 @@ impl OrderBook {
             .bids
             .iter()
             .rev()
+            .filter(|(_, queue)| queue.total_volume > Vol::ZERO)
             .take(depth)
             .map(|(&price, queue)| (price, queue.total_volume))
             .collect();
@@ -212,6 +213,7 @@ impl OrderBook {
         let asks: Vec<(Price, Vol)> = self
             .asks
             .iter()
+            .filter(|(_, queue)| queue.total_volume > Vol::ZERO)
             .take(depth)
             .map(|(&price, queue)| (price, queue.total_volume))
             .collect();
@@ -308,65 +310,111 @@ impl OrderBook {
     /// 返回 `true` 表示本次成功撮合，可继续尝试。
     /// 返回 `false` 表示无法继续（无对手盘或价格不交叉）。
     fn attempt_match(&mut self, taker: &mut Order, events: &mut Vec<MatchEvent>) -> bool {
-        // 1. 确定对手盘，取最优价格
-        let (opponent_book, best_price) = match taker.side {
-            Side::Bid => {
-                // 买入 → 找最低卖价
-                let price = match self.asks.keys().next().copied() {
-                    Some(p) => p,
-                    None => return false, // 无卖盘
-                };
-                (&mut self.asks, price)
-            }
-            Side::Ask => {
-                // 卖出 → 找最高买价
-                let price = match self.bids.keys().next_back().copied() {
-                    Some(p) => p,
-                    None => return false, // 无买盘
-                };
-                (&mut self.bids, price)
-            }
-        };
-
-        // 2. 交叉判断 (Cross Check)
-        if taker.kind == OrderType::Limit {
-            let crossed = match taker.side {
-                Side::Bid => taker.price >= best_price, // 买价 >= 最低卖价
-                Side::Ask => taker.price <= best_price, // 卖价 <= 最高买价
+        loop {
+            // 1. 确定对手盘，取最优价格
+            let (opponent_book, best_price) = match taker.side {
+                Side::Bid => {
+                    // 买入 → 找最低卖价
+                    let price = match self.asks.keys().next().copied() {
+                        Some(p) => p,
+                        None => return false, // 无卖盘
+                    };
+                    (&mut self.asks, price)
+                }
+                Side::Ask => {
+                    // 卖出 → 找最高买价
+                    let price = match self.bids.keys().next_back().copied() {
+                        Some(p) => p,
+                        None => return false, // 无买盘
+                    };
+                    (&mut self.bids, price)
+                }
             };
-            if !crossed {
-                return false; // 价格未交叉，无法撮合
-            }
-        }
-        // 市价单不做交叉检查，直接吃
 
-        // 3. 从最优档位取出 Maker (跳过幽灵订单)
-        let queue = opponent_book.get_mut(&best_price).unwrap();
-        let maker = loop {
-            match queue.raw_pop_front() {
-                Some(order) => {
-                    if self.order_index.contains_key(&order.id) {
-                        break order; // 有效订单
-                    }
-                    // 幽灵订单：影子撤单时已扣减 total_volume，直接丢弃
-                }
-                None => {
-                    // 队列里全是幽灵或已空，清理此档位
-                    opponent_book.remove(&best_price);
-                    return self.attempt_match(taker, events); // 递归尝试下一档位
+            // 2. 交叉判断 (Cross Check)
+            if taker.kind == OrderType::Limit {
+                let crossed = match taker.side {
+                    Side::Bid => taker.price >= best_price, // 买价 >= 最低卖价
+                    Side::Ask => taker.price <= best_price, // 卖价 <= 最高买价
+                };
+                if !crossed {
+                    return false; // 价格未交叉，无法撮合
                 }
             }
-        };
+            // 市价单不做交叉检查，直接吃
 
-        // 3.5 阻止自我成交 (Self-Trade)
-        if taker.agent_id == maker.agent_id {
-            // 不产生 Trade 事件，直接抵消双方的委托量
-            let consumed = taker.amount.min(maker.amount);
+            // 3. 从最优档位取出 Maker (跳过幽灵订单)
             let queue = opponent_book.get_mut(&best_price).unwrap();
-            queue.deduct_volume(maker.amount);
+            let mut empty_level = false;
+            let maker = loop {
+                match queue.raw_pop_front() {
+                    Some(order) => {
+                        if self.order_index.contains_key(&order.id) {
+                            break Some(order); // 有效订单
+                        }
+                        // 幽灵订单：影子撤单时已扣减 total_volume，直接丢弃
+                    }
+                    None => {
+                        // 队列里全是幽灵或已空，清理此档位
+                        opponent_book.remove(&best_price);
+                        empty_level = true;
+                        break None;
+                    }
+                }
+            };
 
-            let maker_remaining = maker.amount - consumed;
+            if empty_level {
+                continue; // 循环尝试下一档位
+            }
+
+            let maker = maker.unwrap();
+
+            // 3.5 阻止自我成交 (Self-Trade)
+            if taker.agent_id == maker.agent_id {
+                // 不产生 Trade 事件，直接抵消双方的委托量
+                let consumed = taker.amount.min(maker.amount);
+                let queue = opponent_book.get_mut(&best_price).unwrap();
+                queue.deduct_volume(maker.amount);
+
+                let maker_remaining = maker.amount - consumed;
+                if maker_remaining > Vol::ZERO {
+                    let mut remaining_maker = maker;
+                    remaining_maker.amount = maker_remaining;
+                    queue.push_front(remaining_maker);
+                    if let Some(meta) = self.order_index.get_mut(&maker.id) {
+                        meta.amount = maker_remaining;
+                    }
+                } else {
+                    self.order_index.remove(&maker.id);
+                    if queue.is_empty() {
+                        opponent_book.remove(&best_price);
+                    }
+                }
+                taker.amount -= consumed;
+
+                // FIX: 发送 SelfTradeCancelled 事件，仅减少挂单的相应数量
+                events.push(MatchEvent::SelfTradeCancelled {
+                    maker_order_id: maker.id,
+                    taker_order_id: taker.id,
+                    consumed,
+                });
+                self.stats.total_rejects += 1;
+
+                return true;
+            }
+
+            // 4. 计算成交量
+            let trade_amount = taker.amount.min(maker.amount);
+
+            // 5. 更新 Maker
+            //    先从 LevelQueue 扣掉 Maker 的 **全部** 原始挂量，
+            //    如果有剩余再 push_front 加回（push_front 内部会 += remaining）。
+            let queue = opponent_book.get_mut(&best_price).unwrap();
+            queue.deduct_volume(maker.amount); // 扣掉整个 Maker
+
+            let maker_remaining = maker.amount - trade_amount;
             if maker_remaining > Vol::ZERO {
+                // Maker 还有剩余：放回队头 (push_front 会加回 remaining 的量)
                 let mut remaining_maker = maker;
                 remaining_maker.amount = maker_remaining;
                 queue.push_front(remaining_maker);
@@ -374,66 +422,30 @@ impl OrderBook {
                     meta.amount = maker_remaining;
                 }
             } else {
+                // Maker 被完全吃掉：从索引移除
                 self.order_index.remove(&maker.id);
                 if queue.is_empty() {
                     opponent_book.remove(&best_price);
                 }
             }
-            taker.amount -= consumed;
 
-            // FIX: 发送 SelfTradeCancelled 事件，仅减少挂单的相应数量
-            events.push(MatchEvent::SelfTradeCancelled {
+            // 6. 扣减 Taker 的量
+            taker.amount -= trade_amount;
+
+            // 7. 生成 Trade 事件 + 统计
+            self.stats.total_trades += 1;
+            self.stats.total_trade_volume += trade_amount;
+            events.push(MatchEvent::Trade {
                 maker_order_id: maker.id,
                 taker_order_id: taker.id,
-                consumed,
+                maker_agent_id: maker.agent_id,
+                taker_agent_id: taker.agent_id,
+                price: best_price,
+                amount: trade_amount,
             });
-            self.stats.total_rejects += 1;
 
             return true;
         }
-
-        // 4. 计算成交量
-        let trade_amount = taker.amount.min(maker.amount);
-
-        // 5. 更新 Maker
-        //    先从 LevelQueue 扣掉 Maker 的 **全部** 原始挂量，
-        //    如果有剩余再 push_front 加回（push_front 内部会 += remaining）。
-        let queue = opponent_book.get_mut(&best_price).unwrap();
-        queue.deduct_volume(maker.amount); // 扣掉整个 Maker
-
-        let maker_remaining = maker.amount - trade_amount;
-        if maker_remaining > Vol::ZERO {
-            // Maker 还有剩余：放回队头 (push_front 会加回 remaining 的量)
-            let mut remaining_maker = maker;
-            remaining_maker.amount = maker_remaining;
-            queue.push_front(remaining_maker);
-            if let Some(meta) = self.order_index.get_mut(&maker.id) {
-                meta.amount = maker_remaining;
-            }
-        } else {
-            // Maker 被完全吃掉：从索引移除
-            self.order_index.remove(&maker.id);
-            if queue.is_empty() {
-                opponent_book.remove(&best_price);
-            }
-        }
-
-        // 6. 扣减 Taker 的量
-        taker.amount -= trade_amount;
-
-        // 7. 生成 Trade 事件 + 统计
-        self.stats.total_trades += 1;
-        self.stats.total_trade_volume += trade_amount;
-        events.push(MatchEvent::Trade {
-            maker_order_id: maker.id,
-            taker_order_id: taker.id,
-            maker_agent_id: maker.agent_id,
-            taker_agent_id: taker.agent_id,
-            price: best_price,
-            amount: trade_amount,
-        });
-
-        true
     }
 
     /// GC 辅助：清理单侧盘口中的幽灵订单

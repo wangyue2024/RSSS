@@ -215,12 +215,12 @@ fn test_warmup_no_trades() {
     // 预热期不应有任何持仓变动
     for agent in &world.agents {
         assert_eq!(
-            agent.cash, 10_000_000_000,
+            agent.cash, 100_000_000_000,
             "Agent {} cash changed during warmup",
             agent.id
         );
         assert_eq!(
-            agent.stock, 100,
+            agent.stock, 10,
             "Agent {} stock changed during warmup",
             agent.id
         );

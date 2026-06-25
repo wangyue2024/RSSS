@@ -15,7 +15,7 @@ use crate::domain::{Order, Vol};
 /// 包含该档位的所有挂单（FIFO 顺序）和缓存的总挂单量。
 #[derive(Debug, Clone)]
 pub struct LevelQueue {
-    /// 缓存的总挂单量，L2 读取时直接返回此值
+    /// 缓存的总挂单量，L2 读取6时直接返回此值
     pub total_volume: Vol,
     /// FIFO 队列，保证同价位时间优先 (Time-Priority)
     pub orders: VecDeque<Order>,

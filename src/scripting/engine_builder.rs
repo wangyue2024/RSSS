@@ -23,6 +23,10 @@ pub fn build_engine() -> Engine {
     // 优化等级：Full (更激进的常量折叠)
     engine.set_optimization_level(rhai::OptimizationLevel::Full);
 
+    // 设置最大调用深度与表达式深度，防止栈溢出 (STATUS_STACK_OVERFLOW)
+    engine.set_max_call_levels(10);
+    engine.set_max_expr_depths(40, 20);
+
     // ---- 类型注册 ----
     api::register_all(&mut engine);
 

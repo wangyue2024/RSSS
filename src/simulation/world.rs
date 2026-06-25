@@ -1,7 +1,3 @@
-//! World 全局状态 + 主循环
-//!
-//! 串联 domain → engine → scripting 三层的 "上帝" 模块。
-
 use std::sync::Arc;
 
 use rand::seq::SliceRandom;
@@ -23,43 +19,27 @@ use super::settlement::{
     update_order_books_self_trade_cancelled, update_order_books_trade, validate_action,
 };
 
-/// 全局仿真状态
 pub struct World {
     pub config: SimConfig,
     pub tick: i64,
-
-    // — 核心组件 —
     pub rhai_engine: rhai::Engine,
     pub order_book: OrderBook,
     pub agents: Vec<AgentState>,
     pub global_rng: Xoshiro256PlusPlus,
-
-    // — 指标 —
     pub indicators: IndicatorEngine,
 
-    // — Tick 聚合 —
     pub tick_volume: i64,
     pub tick_buy_volume: i64,
     pub tick_sell_volume: i64,
     pub tick_vwap_numer: i128,
-
-    // — 统计 —
     pub sim_rejects: u64,
-
-    // — 本 Tick 成交记录 (supply to recorder/TUI) —
     pub last_tick_trades: Vec<(u32, u32, i64, i64, i8)>, // (maker_id, taker_id, price, amount, taker_side)
 }
 
 impl World {
-    /// 构建完整世界
-    ///
-    /// `scripts`: Vec<(source_code, script_name)>
-    /// MM 类策略（名字包含 "market_maker" 或 "_mm"）获得 5x 资金和底仓
     pub fn new(config: SimConfig, scripts: Vec<(String, String)>) -> Result<Self, String> {
         let rhai_engine = crate::scripting::build_engine();
-
-        // 编译并校验脚本，保留名字用于 MM 识别
-        let mut compiled: Vec<(Arc<rhai::AST>, bool)> = Vec::new(); // (ast, is_mm)
+        let mut compiled: Vec<(Arc<rhai::AST>, bool)> = Vec::new();
         for (i, (src, name)) in scripts.iter().enumerate() {
             let ast = sandbox::compile_and_validate(&rhai_engine, src)
                 .map_err(|e| format!("Script {} compile error: {}", i, e))?;
@@ -67,7 +47,6 @@ impl World {
             compiled.push((Arc::new(ast), is_mm));
         }
 
-        // 创建 Agents (所有 agent 相同初始资金)
         let mut agents = Vec::with_capacity(config.num_agents as usize);
         for id in 0..config.num_agents {
             let ast_idx = id as usize % compiled.len().max(1);
@@ -105,8 +84,7 @@ impl World {
             last_tick_trades: Vec::new(),
         })
     }
-
-    /// 运行全部 Tick
+    /// 运行全部 Tick，整个模拟
     pub fn run(&mut self) {
         let total = self.config.total_ticks;
         for tick in 0..total {
